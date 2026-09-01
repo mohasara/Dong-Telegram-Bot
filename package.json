@@ -1,0 +1,30 @@
+{
+  "name": "dong",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mohasara/dong.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/mohasara/dong/issues"
+  },
+  "homepage": "https://github.com/mohasara/dong#readme",
+  "dependencies": {
+    "grammy": "^1.46.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260831.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.127.1"
+  },
+  "type": "module"
+}
