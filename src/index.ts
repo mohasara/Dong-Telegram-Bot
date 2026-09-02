@@ -35,60 +35,102 @@ async function deleteDraft(db: D1Database, key: string) {
   await db.prepare("DELETE FROM drafts WHERE id = ?").bind(key).run();
 }
 
-// NATIVE MATH EVALUATOR (Cloudflare safe, no eval/new Function)
-function safeEval(expr: string): number {
-  // 1. Convert Persian and Arabic numerals to English digits
+// ----------------------------------------------------
+// NATIVE MATH AST PARSER (Cloudflare & Spaces Safe)
+// ----------------------------------------------------
+function extractMathValues(input: string, expectedCount: number): number[] | null {
+  // 1. Convert Persian/Arabic numerals to English
   const persian = [/۰/g, /۱/g, /۲/g, /۳/g, /۴/g, /۵/g, /۶/g, /۷/g, /۸/g, /۹/g];
   const arabic  = [/٠/g, /١/g, /٢/g, /٣/g, /٤/g, /٥/g, /٦/g, /٧/g, /٨/g, /٩/g];
   for (let i = 0; i < 10; i++) {
-    expr = expr.replace(persian[i], i.toString()).replace(arabic[i], i.toString());
+    input = input.replace(persian[i], i.toString()).replace(arabic[i], i.toString());
+  }
+  
+  // 2. Format separators safely
+  if (expectedCount === 1) {
+    input = input.replace(/,/g, ''); // 1 value expected? Assume commas are thousands separators
+  } else {
+    input = input.replace(/,/g, ' '); // Multiple expected? Treat commas as spaces
   }
 
-  // 2. Strip invalid characters
-  expr = expr.replace(/[^0-9+\-*/().]/g, '');
-  if (!expr) return NaN;
-
-  // 3. Recursive Descent Parser
   let pos = 0;
+  function skipWhitespace() {
+    while (pos < input.length && /\s/.test(input[pos])) pos++;
+  }
 
   function parseExpression(): number {
+    skipWhitespace();
     let val = parseTerm();
-    while (pos < expr.length) {
-      if (expr[pos] === '+') { pos++; val += parseTerm(); }
-      else if (expr[pos] === '-') { pos++; val -= parseTerm(); }
+    skipWhitespace();
+    while (pos < input.length) {
+      if (input[pos] === '+') { pos++; val += parseTerm(); }
+      else if (input[pos] === '-') { pos++; val -= parseTerm(); }
       else break;
+      skipWhitespace();
     }
     return val;
   }
 
   function parseTerm(): number {
+    skipWhitespace();
     let val = parseFactor();
-    while (pos < expr.length) {
-      if (expr[pos] === '*') { pos++; val *= parseFactor(); }
-      else if (expr[pos] === '/') { pos++; val /= parseFactor(); }
+    skipWhitespace();
+    while (pos < input.length) {
+      if (input[pos] === '*') { pos++; val *= parseFactor(); }
+      else if (input[pos] === '/') { pos++; val /= parseFactor(); }
       else break;
+      skipWhitespace();
     }
     return val;
   }
 
   function parseFactor(): number {
-    if (expr[pos] === '+') { pos++; return parseFactor(); }
-    if (expr[pos] === '-') { pos++; return -parseFactor(); }
-    if (expr[pos] === '(') {
+    skipWhitespace();
+    if (pos >= input.length) return NaN;
+    
+    let sign = 1;
+    if (input[pos] === '+') { pos++; sign = 1; }
+    else if (input[pos] === '-') { pos++; sign = -1; }
+    skipWhitespace();
+
+    if (input[pos] === '(') {
       pos++;
       let val = parseExpression();
-      if (expr[pos] === ')') pos++;
-      return val;
+      skipWhitespace();
+      if (input[pos] === ')') pos++;
+      return sign * val;
     }
+    
     let start = pos;
-    while (pos < expr.length && /[0-9.]/.test(expr[pos])) pos++;
-    const numStr = expr.substring(start, pos);
-    return numStr ? parseFloat(numStr) : NaN;
+    while (pos < input.length && /[0-9.]/.test(input[pos])) pos++;
+    if (start === pos) return NaN;
+    const numStr = input.substring(start, pos);
+    return sign * parseFloat(numStr);
   }
 
-  const result = parseExpression();
-  return isNaN(result) ? NaN : result;
+  const results: number[] = [];
+  for (let i = 0; i < expectedCount; i++) {
+    skipWhitespace();
+    if (pos >= input.length) break;
+    const val = parseExpression();
+    if (isNaN(val)) return null;
+    results.push(val);
+  }
+  
+  skipWhitespace();
+  if (pos < input.length) return null; // Fail if unparsed junk remains
+  
+  return results.length === expectedCount ? results : null;
 }
+
+function safeEval(expr: string): number {
+  const res = extractMathValues(expr, 1);
+  return res ? res[0] : NaN;
+}
+
+// ----------------------------------------------------
+// LEDGER MATH Logic
+// ----------------------------------------------------
 
 async function calculateBalances(db: D1Database, projectId: number) {
   const members = await getProjectMembers(db, projectId);
@@ -171,8 +213,7 @@ export default {
       const processNew = async (ctx: Context, args: string[]) => {
         if (!ctx.chat) return;
         if (!args || args.length === 0) return ctx.reply("❌ Missing project name.");
-        const name = args[0]; 
-        const currency = args[1] || "";
+        const name = args[0]; const currency = args[1] || "";
         const proj = await env.DB.prepare("INSERT INTO projects (chat_id, name, currency) VALUES (?, ?, ?) RETURNING id").bind(ctx.chat.id, name, currency).first() as any;
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(proj.id, ctx.from!.id, ctx.from!.first_name).run();
 
@@ -183,13 +224,11 @@ export default {
       const processAdd = async (ctx: Context, args: string[]) => {
         if (!ctx.chat) return;
         if (!args || args.length === 0) return ctx.reply("❌ Missing expense amount.");
-        const amount = safeEval(args[0]); // Works securely via AST parser
-        if (isNaN(amount)) return ctx.reply("❌ Invalid amount provided.");
+        const amount = safeEval(args[0]);
+        if (isNaN(amount) || amount <= 0) return ctx.reply("❌ Invalid amount provided.");
         
         let desc = args.slice(1).join(" ");
-        if (!desc) {
-          desc = new Date().toISOString().replace('T', ' ').substring(0, 16); 
-        }
+        if (!desc) desc = new Date().toISOString().replace('T', ' ').substring(0, 16); 
 
         const draftId = `exp_${ctx.chat.id}_${Date.now()}`;
         const projectId = await routeProjectCommand(ctx, env.DB, "add", `${draftId}`);
@@ -325,7 +364,7 @@ export default {
         const replyTo = ctx.message.reply_to_message;
         if (!replyTo || !replyTo.text) return next();
 
-        // Catch missing argument prompts
+        // Action Prompts (Missing arguments from commands)
         const actionMatch = replyTo.text.match(/\[Action:\s*([^\]]+)\]/);
         if (actionMatch) {
           const action = actionMatch[1];
@@ -337,33 +376,33 @@ export default {
           return next();
         }
 
-        // Catch Unequal Split Arrays
+        // Unequal Split Arrays
         const draftMatch = replyTo.text.match(/\[Draft:\s*(exp_[^\]]+)\]/);
         if (draftMatch) {
           const draftId = draftMatch[1];
           const draft = await getDraft(env.DB, draftId);
           if (!draft || !draft.splitOrder) return ctx.reply("❌ This split session has expired or was already saved.");
 
-          // Normalize spaces around operators before splitting
-          // e.g. "800 + 4000  2000 - 200" => "800+4000  2000-200"
           const inputText = ctx.message.text.trim();
-          const normalizedText = inputText.replace(/\s*([+\-*/()])\s*/g, '$1');
-          const entries = normalizedText.split(/[,\s]+/).filter(e => e.length > 0);
+          const expectedCount = draft.splitOrder.length;
+          
+          // Use our new powerful parser to extract X values safely
+          const entries = extractMathValues(inputText, expectedCount);
 
-          if (entries.length !== draft.splitOrder.length) {
-            return ctx.reply(`❌ I need exactly ${draft.splitOrder.length} numbers. You provided ${entries.length}.`);
+          if (!entries) {
+            return ctx.reply(`❌ Parse Error: I need exactly ${expectedCount} valid mathematical expressions.\nMake sure you separate each person's math block with a space.\n\nExample: "250+1000  (3000*2-1000)/2"`);
           }
 
           const members = await getProjectMembers(env.DB, draft.projectId);
           const userShares: { userId: number; amount: number; name: string }[] = [];
           let totalSum = 0;
 
-          for (let i = 0; i < entries.length; i++) {
+          for (let i = 0; i < expectedCount; i++) {
             const userId = draft.splitOrder[i];
             const member = members.find(m => m.user_id === userId);
+            const amt = entries[i];
             
-            const amt = safeEval(entries[i]);
-            if (isNaN(amt) || amt < 0) return ctx.reply(`❌ Invalid math: '${entries[i]}'`);
+            if (!Number.isFinite(amt) || amt < 0) return ctx.reply(`❌ Invalid math result for ${member?.name}: '${amt}'`);
             
             userShares.push({ userId, amount: amt, name: member?.name || "Unknown" });
             totalSum += amt;
@@ -478,7 +517,7 @@ export default {
         let msg = `⚡ <b>Unequal Split:</b> ${draft.desc} (Total: <b>${draft.amount}</b>)\n\n`;
         msg += `Reply to this message with amounts in this order:\n`;
         activeMembers.forEach((m, idx) => { msg += `<b>${idx + 1}.</b> ${m.name}\n`; });
-        msg += `\n<i>(e.g., "2000 4000-1000 0")</i>\n\n`;
+        msg += `\n<i>(e.g., "(250+1000)*2   (3000*2-1000)/2")</i>\n\n`;
         msg += `<span class="tg-spoiler">[Draft: ${draftId}]</span>`;
 
         await ctx.deleteMessage().catch(()=>true);
