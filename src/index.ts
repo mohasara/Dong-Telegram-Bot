@@ -482,6 +482,85 @@ export default {
 
       return webhookCallback(bot, "cloudflare-mod")(request);
     }
+    // --- /REPORT COMMAND ---
+      bot.command("report", async (ctx) => {
+        if (ctx.chat.type === "private") return;
+        const projId = await routeProjectCommand(ctx, "report");
+        if (projId) await showReport(ctx, env.DB, projId);
+      });
+
+      bot.callbackQuery(/selproj_report_(\d+)_/, async (ctx) => {
+        await showReport(ctx, env.DB, Number(ctx.match[1]));
+        await ctx.answerCallbackQuery();
+      });
+
+      async function showReport(ctx: Context, db: D1Database, projId: number) {
+        const proj = await getProjectById(db, projId);
+        const { netBalances, names, totalPaid, members } = await calculateBalances(db, projId);
+
+        const expSumRow = await db.prepare("SELECT SUM(amount) as total, COUNT(id) as count FROM expenses WHERE project_id = ?").bind(projId).first() as any;
+        const totalExp = expSumRow?.total || 0;
+        const countExp = expSumRow?.count || 0;
+
+        let msg = `📈 <b>Full Report: ${proj.name}</b> (${proj.status.toUpperCase()})\n\n`;
+        msg += `💵 <b>Total Expenses:</b> ${totalExp.toFixed(2)} ${proj.currency} (${countExp} entries)\n\n`;
+        msg += `👥 <b>Individual Spending:</b>\n`;
+        
+        for (const m of members) {
+          const paid = totalPaid[m.user_id] || 0;
+          const bal = netBalances[m.user_id] || 0;
+          msg += `• <b>${m.name}:</b> Paid ${paid.toFixed(2)} ${proj.currency} | Net: ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}\n`;
+        }
+
+        ctx.callbackQuery ? await ctx.editMessageText(msg, { parse_mode: "HTML" }) : await ctx.reply(msg, { parse_mode: "HTML" });
+      }
+
+      // --- /HISTORY COMMAND ---
+      bot.command("history", async (ctx) => {
+        if (ctx.chat.type === "private") return ctx.reply("Use /history inside your group.");
+        const projects = await getAllProjects(env.DB, ctx.chat.id);
+        if (projects.length === 0) return ctx.reply("No projects found for this group.");
+
+        const kb = new InlineKeyboard();
+        for (const p of projects) {
+          const statusIcon = p.status === "active" ? "🟢" : "🔒";
+          kb.text(`${statusIcon} ${p.name} (${p.currency})`, `selproj_report_${p.id}_`).row();
+        }
+        await ctx.reply("📜 <b>Project History:</b>\nSelect any project to view its full report:", { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      // --- /END COMMAND ---
+      bot.command("end", async (ctx) => {
+        if (ctx.chat.type === "private") return ctx.reply("Use /end inside your group.");
+        const active = await getActiveProjects(env.DB, ctx.chat.id);
+        if (active.length === 0) return ctx.reply("No active projects to close.");
+
+        const kb = new InlineKeyboard();
+        for (const p of active) {
+          kb.text(`Close: ${p.name}`, `endproj_${p.id}`).row();
+        }
+        await ctx.reply("⚠️ <b>Select a project to close:</b>\n(Note: All balances must be settled first)", { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      bot.callbackQuery(/endproj_(\d+)/, async (ctx) => {
+        const projId = Number(ctx.match[1]);
+        const proj = await getProjectById(env.DB, projId);
+        const { netBalances } = await calculateBalances(env.DB, projId);
+
+        // Check if anyone has a balance greater than 0.01 (cents)
+        const unsettled = Object.values(netBalances).some(b => Math.abs(b) > 0.01);
+        if (unsettled) {
+          await ctx.editMessageText(
+            `❌ <b>Cannot close ${proj.name}!</b>\n\nThere are still unsettled debts. Run /settle to see who needs to pay whom, and log payments with /pay.`,
+            { parse_mode: "HTML" }
+          );
+          return ctx.answerCallbackQuery();
+        }
+
+        await env.DB.prepare("UPDATE projects SET status = 'ended' WHERE id = ?").bind(projId).run();
+        await ctx.editMessageText(`🔒 <b>Project ${proj.name} is now officially closed and archived.</b>`, { parse_mode: "HTML" });
+        await ctx.answerCallbackQuery();
+      });
     return new Response("Bot is active.", { status: 200 });
   },
 };
