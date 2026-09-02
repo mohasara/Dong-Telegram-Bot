@@ -1,3 +1,3 @@
 # Telegram Dong & Expense Split Bot
 
-t.me/DongShareBot
+https://t.me/DongShareBot
