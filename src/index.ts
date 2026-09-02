@@ -10,11 +10,14 @@ export interface Env {
 // ----------------------------------------------------
 
 async function getActiveProjects(db: D1Database, chatId: number) {
-  const { results } = await db.prepare("SELECT * FROM projects WHERE chat_id = ? AND status = 'active' ORDER BY id DESC").bind(chatId).all();
+  // Support both normal chat IDs and supergroup IDs (-100 prefix)
+  const altChatId = chatId > 0 ? -Number(`100${chatId}`) : chatId;
+  const { results } = await db.prepare("SELECT * FROM projects WHERE (chat_id = ? OR chat_id = ?) AND status = 'active' ORDER BY id DESC").bind(chatId, altChatId).all();
   return results as any[];
 }
 async function getAllProjects(db: D1Database, chatId: number) {
-  const { results } = await db.prepare("SELECT * FROM projects WHERE chat_id = ? ORDER BY id DESC").bind(chatId).all();
+  const altChatId = chatId > 0 ? -Number(`100${chatId}`) : chatId;
+  const { results } = await db.prepare("SELECT * FROM projects WHERE (chat_id = ? OR chat_id = ?) ORDER BY id DESC").bind(chatId, altChatId).all();
   return results as any[];
 }
 async function getProjectById(db: D1Database, projectId: number) {
@@ -35,22 +38,18 @@ async function deleteDraft(db: D1Database, key: string) {
   await db.prepare("DELETE FROM drafts WHERE id = ?").bind(key).run();
 }
 
-// NATIVE MATH EVALUATOR (Cloudflare safe, no eval/new Function)
+// NATIVE MATH EVALUATOR
 function safeEval(expr: string): number {
-  // 1. Convert Persian and Arabic numerals to English digits
   const persian = [/۰/g, /۱/g, /۲/g, /۳/g, /۴/g, /۵/g, /۶/g, /۷/g, /۸/g, /۹/g];
   const arabic  = [/٠/g, /١/g, /٢/g, /٣/g, /٤/g, /٥/g, /٦/g, /٧/g, /٨/g, /٩/g];
   for (let i = 0; i < 10; i++) {
     expr = expr.replace(persian[i], i.toString()).replace(arabic[i], i.toString());
   }
 
-  // 2. Strip invalid characters
   expr = expr.replace(/[^0-9+\-*/().]/g, '');
   if (!expr) return NaN;
 
-  // 3. Recursive Descent Parser
   let pos = 0;
-
   function parseExpression(): number {
     let val = parseTerm();
     while (pos < expr.length) {
@@ -60,7 +59,6 @@ function safeEval(expr: string): number {
     }
     return val;
   }
-
   function parseTerm(): number {
     let val = parseFactor();
     while (pos < expr.length) {
@@ -70,7 +68,6 @@ function safeEval(expr: string): number {
     }
     return val;
   }
-
   function parseFactor(): number {
     if (expr[pos] === '+') { pos++; return parseFactor(); }
     if (expr[pos] === '-') { pos++; return -parseFactor(); }
@@ -87,7 +84,7 @@ function safeEval(expr: string): number {
   }
 
   const result = parseExpression();
-  if (pos < expr.length) return NaN; // invalid trailing characters
+  if (pos < expr.length) return NaN;
   return isNaN(result) ? NaN : result;
 }
 
@@ -159,11 +156,6 @@ async function routeProjectCommand(ctx: Context, db: D1Database, action: string,
   return null;
 }
 
-// Attempts to clean up a command message to keep the chat tidy (requires bot to be admin)
-async function tryDeleteCommand(ctx: Context) {
-  try { await ctx.deleteMessage(); } catch (e) {}
-}
-
 // ----------------------------------------------------
 // BOT ENTRYPOINT
 // ----------------------------------------------------
@@ -173,7 +165,6 @@ export default {
     if (request.method === "POST") {
       const bot = new Bot(env.BOT_TOKEN);
 
-      // --- INTERNAL COMMAND PROCESSORS ---
       const processNew = async (ctx: Context, args: string[]) => {
         if (!ctx.chat) return;
         if (!args || args.length === 0) return ctx.reply("❌ Missing project name.");
@@ -214,19 +205,17 @@ export default {
       };
 
       // ====================================================
-      // 1. REGISTER ALL COMMANDS FIRST
+      // 1. COMMANDS
       // ====================================================
 
       bot.command("start", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
         if (ctx.chat.type === "private") return ctx.reply("👋 Welcome to Dong Split Bot!\n\nAdd me to a group to manage shared expenses.\nUse /mybalance here to see what you owe.");
         await ctx.reply("👋 Dong Bot is active!\n\nCreate a project with: <code>/new &lt;Name&gt; [Currency]</code>", { parse_mode: "HTML" });
       });
 
       bot.command("mybalance", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
         if (ctx.chat.type !== "private") return ctx.reply("Use /balances inside your group, or use /mybalance in private chat.");
         const userId = ctx.from!.id;
         const { results: memberships } = await env.DB.prepare(
@@ -247,7 +236,6 @@ export default {
 
       bot.command("new", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
         if (ctx.chat.type === "private") return ctx.reply("Please use /new inside a group chat.");
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) return ctx.reply("Reply to this message with your Project Name and Currency (e.g. <code>Party $</code>):\n\n<span class=\"tg-spoiler\">[Action: new_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
@@ -256,7 +244,6 @@ export default {
 
       bot.command("add", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
         if (ctx.chat.type === "private") return ctx.reply("Use /add in your group.");
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) return ctx.reply("Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code>):\n\n<span class=\"tg-spoiler\">[Action: add_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
@@ -265,7 +252,6 @@ export default {
 
       bot.command("pay", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
         if (ctx.chat.type === "private") return ctx.reply("Use /pay in your group.");
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) return ctx.reply("Reply to this message with the amount you are transferring (e.g. <code>50000</code>):\n\n<span class=\"tg-spoiler\">[Action: pay_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
@@ -274,40 +260,30 @@ export default {
 
       bot.command("balances", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
-        if (ctx.chat.type === "private") return ctx.reply("Use /balances inside your group.");
         const projId = await routeProjectCommand(ctx, env.DB, "bal");
         if (projId) await showBalancesMenu(ctx, env.DB, projId);
       });
 
       bot.command("settle", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
-        if (ctx.chat.type === "private") return ctx.reply("Use /settle inside your group.");
         const projId = await routeProjectCommand(ctx, env.DB, "settle");
         if (projId) await showSettlement(ctx, env.DB, projId);
       });
 
       bot.command("delete", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
-        if (ctx.chat.type === "private") return ctx.reply("Use /delete inside your group.");
         const projId = await routeProjectCommand(ctx, env.DB, "delete");
         if (projId) await showLedger(ctx, env.DB, projId);
       });
 
       bot.command("report", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
-        if (ctx.chat.type === "private") return ctx.reply("Use /report inside your group.");
         const projId = await routeProjectCommand(ctx, env.DB, "report");
         if (projId) await showReport(ctx, env.DB, projId);
       });
 
       bot.command("projects", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
-        if (ctx.chat.type === "private") return ctx.reply("Use /projects inside your group.");
         const projects = await getAllProjects(env.DB, ctx.chat.id);
         if (projects.length === 0) return ctx.reply("No projects found for this group.");
 
@@ -321,8 +297,6 @@ export default {
 
       bot.command("close", async (ctx) => {
         if (!ctx.chat) return;
-        await tryDeleteCommand(ctx);
-        if (ctx.chat.type === "private") return ctx.reply("Use /close inside your group.");
         const active = await getActiveProjects(env.DB, ctx.chat.id);
         if (active.length === 0) return ctx.reply("No active projects to close.");
 
@@ -334,18 +308,17 @@ export default {
       });
 
       // ====================================================
-      // 2. GLOBAL MESSAGE CATCHER (FOR REPLIES) 
+      // 2. MESSAGE CATCHER (CLEANS UP ONLY WHEN JOB IS FINISHED)
       // ====================================================
       
       bot.on("message:text", async (ctx, next) => {
         const replyTo = ctx.message.reply_to_message;
         if (!replyTo || !replyTo.text) return next();
 
-        // Helper to aggressively clean the chat of the bot prompt and the user's text reply
-        const cleanPromptMess = async () => {
+        const cleanCompletedJob = async () => {
           if (!ctx.chat) return;
-          try { await ctx.deleteMessage(); } catch (e) {} // delete user's reply
-          try { await ctx.api.deleteMessage(ctx.chat.id, replyTo.message_id); } catch (e) {} // delete bot's force_reply prompt
+          try { await ctx.deleteMessage(); } catch (e) {} // delete user's input message
+          try { await ctx.api.deleteMessage(ctx.chat.id, replyTo.message_id); } catch (e) {} // delete bot's prompt message
         };
 
         // Catch missing argument prompts
@@ -354,7 +327,7 @@ export default {
           const action = actionMatch[1];
           const args = ctx.message.text.trim().split(/\s+/).filter(Boolean);
           
-          await cleanPromptMess(); // Clean before showing next step
+          await cleanCompletedJob(); // Clean up the initial prompt dialog
           
           if (action === "new_prompt") return processNew(ctx, args);
           if (action === "add_prompt") return processAdd(ctx, args);
@@ -367,12 +340,9 @@ export default {
         if (draftMatch) {
           const draftId = draftMatch[1];
           const draft = await getDraft(env.DB, draftId);
-          if (!draft || !draft.splitOrder) return ctx.reply("❌ This split session has expired or was already saved.");
+          if (!draft || !draft.splitOrder) return ctx.reply("❌ This split session has expired.");
 
-          // Normalize spaces around operators before splitting
-          // e.g. "800+4000  2000-200"
-          const inputText = ctx.message.text.trim();
-          const normalizedText = inputText.replace(/\s*([+\-*/()])\s*/g, '$1');
+          const normalizedText = ctx.message.text.trim().replace(/\s*([+\-*/()])\s*/g, '$1');
           const entries = normalizedText.split(/[,\s]+/).filter(e => e.length > 0);
 
           if (entries.length !== draft.splitOrder.length) {
@@ -398,7 +368,8 @@ export default {
             return ctx.reply(`❌ Total mismatch! Your inputs sum to <b>${totalSum}</b>, but the expense is <b>${draft.amount}</b>.`, { parse_mode: "HTML" });
           }
 
-          await cleanPromptMess(); // Clean the prompt only if inputs are valid!
+          // ONLY delete the conversational flow messages *after* successful processing
+          await cleanCompletedJob();
 
           const exp = await env.DB.prepare("INSERT INTO expenses (project_id, payer_id, amount, description) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.payerId, draft.amount, draft.desc).first() as any;
           for (const s of userShares) await env.DB.prepare("INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)").bind(exp.id, s.userId, s.amount).run();
@@ -508,7 +479,7 @@ export default {
         msg += `\n<i>(e.g., "2000 4000-1000 0")</i>\n\n`;
         msg += `<span class="tg-spoiler">[Draft: ${draftId}]</span>`;
 
-        await ctx.deleteMessage().catch(()=>true); // Cleans up the inline keyboard message
+        await ctx.deleteMessage().catch(()=>true);
         await ctx.reply(msg, { parse_mode: "HTML", reply_markup: { force_reply: true } });
         await ctx.answerCallbackQuery();
       });
@@ -654,8 +625,8 @@ export default {
 
       bot.callbackQuery(/closeproj_(\d+)/, async (ctx) => {
         const projId = Number(ctx.match[1]);
-        const proj = await getProjectById(env.DB, projId);
-        const { netBalances } = await calculateBalances(env.DB, projId);
+        const proj = await getProjectById(db, projId);
+        const { netBalances } = await calculateBalances(db, projId);
 
         const unsettled = Object.values(netBalances).some(b => Math.abs(b) > 0.01);
         if (unsettled) {
