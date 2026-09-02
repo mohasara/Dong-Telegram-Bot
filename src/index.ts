@@ -102,6 +102,16 @@ function solveSettlement(netBalances: Record<number, number>, names: Record<numb
   return txs.map(t => `💸 <b>${names[t.from]}</b> ➔ <b>${names[t.to]}</b>: ${t.amount.toFixed(2)} ${currency}`);
 }
 
+async function routeProjectCommand(ctx: Context, db: D1Database, action: string, payload: string = "") {
+  const active = await getActiveProjects(db, ctx.chat!.id);
+  if (active.length === 0) { await ctx.reply("❌ No active projects."); return null; }
+  if (active.length === 1) return active[0].id;
+  const kb = new InlineKeyboard();
+  for (const p of active) kb.text(`${p.name} (${p.currency})`, `selproj_${action}_${p.id}_${payload}`).row();
+  await ctx.reply("📁 Choose a project:", { reply_markup: kb });
+  return null;
+}
+
 // ----------------------------------------------------
 // BOT ENTRYPOINT
 // ----------------------------------------------------
@@ -112,7 +122,6 @@ export default {
       const bot = new Bot(env.BOT_TOKEN);
 
       // --- INTERNAL COMMAND PROCESSORS ---
-      
       const processInit = async (ctx: Context, args: string[]) => {
         if (!args || args.length === 0) return ctx.reply("❌ Missing project name.");
         const name = args[0]; const currency = args[1] || "$";
@@ -128,14 +137,13 @@ export default {
         const amount = parseFloat(args[0]);
         if (isNaN(amount)) return ctx.reply("❌ Invalid amount provided.");
         
-        // If no description, use current Date & Time
         let desc = args.slice(1).join(" ");
         if (!desc) {
           desc = new Date().toISOString().replace('T', ' ').substring(0, 16); 
         }
 
         const draftId = `exp_${ctx.chat.id}_${Date.now()}`;
-        const projectId = await routeProjectCommand(ctx, "exp", `${draftId}`);
+        const projectId = await routeProjectCommand(ctx, env.DB, "exp", `${draftId}`);
         await saveDraft(env.DB, draftId, { amount, desc, projectId, payerId: null, splitWith: [] });
         if (projectId) await promptPayerSelection(ctx, env.DB, draftId, projectId, amount, desc);
       };
@@ -145,12 +153,14 @@ export default {
         const amount = parseFloat(args[0]);
         if (isNaN(amount) || amount <= 0) return ctx.reply("❌ Invalid payment amount.");
         const draftId = `pay_${ctx.chat.id}_${Date.now()}`;
-        const projId = await routeProjectCommand(ctx, "pay", draftId);
+        const projId = await routeProjectCommand(ctx, env.DB, "pay", draftId);
         await saveDraft(env.DB, draftId, { amount, projectId: projId, fromId: null, toId: null });
         if (projId) await promptPaySender(ctx, env.DB, draftId, projId, amount);
       };
 
-      // --- STANDARD COMMAND HANDLERS ---
+      // ====================================================
+      // 1. REGISTER ALL COMMANDS FIRST
+      // ====================================================
 
       bot.command("start", async (ctx) => {
         if (ctx.chat.type === "private") return ctx.reply("👋 Welcome to Dong Split Bot!\n\nAdd me to a group to manage trips.\nUse /mybalance here to see what you owe.");
@@ -179,37 +189,83 @@ export default {
       bot.command("init", async (ctx) => {
         if (ctx.chat.type === "private") return ctx.reply("Please use /init inside a group chat.");
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-        if (args.length === 0) {
-          return ctx.reply("Reply to this message with your Project Name and Currency (e.g. <code>Trip $</code>):\n\n<span class=\"tg-spoiler\">[Action: init_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
-        }
+        if (args.length === 0) return ctx.reply("Reply to this message with your Project Name and Currency (e.g. <code>Trip $</code>):\n\n<span class=\"tg-spoiler\">[Action: init_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
         await processInit(ctx, args);
       });
 
       bot.command("expense", async (ctx) => {
         if (ctx.chat.type === "private") return ctx.reply("Use /expense in your group.");
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-        if (args.length === 0) {
-          return ctx.reply("Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code>):\n\n<span class=\"tg-spoiler\">[Action: expense_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
-        }
+        if (args.length === 0) return ctx.reply("Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code>):\n\n<span class=\"tg-spoiler\">[Action: expense_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
         await processExpense(ctx, args);
       });
 
       bot.command("pay", async (ctx) => {
         if (ctx.chat.type === "private") return ctx.reply("Use /pay in your group.");
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-        if (args.length === 0) {
-          return ctx.reply("Reply to this message with the amount you are transferring (e.g. <code>50000</code>):\n\n<span class=\"tg-spoiler\">[Action: pay_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
-        }
+        if (args.length === 0) return ctx.reply("Reply to this message with the amount you are transferring (e.g. <code>50000</code>):\n\n<span class=\"tg-spoiler\">[Action: pay_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
         await processPay(ctx, args);
       });
 
-      // --- GLOBAL MESSAGE CATCHER (FOR ALL REPLIES) ---
-      
-      bot.on("message:text", async (ctx) => {
-        const replyTo = ctx.message.reply_to_message;
-        if (!replyTo || !replyTo.text) return;
+      bot.command("balances", async (ctx) => {
+        if (ctx.chat.type === "private") return ctx.reply("Use /balances inside your group.");
+        const projId = await routeProjectCommand(ctx, env.DB, "bal");
+        if (projId) await showBalancesMenu(ctx, env.DB, projId);
+      });
 
-        // 1. Catch missing argument prompts
+      bot.command("settle", async (ctx) => {
+        if (ctx.chat.type === "private") return ctx.reply("Use /settle inside your group.");
+        const projId = await routeProjectCommand(ctx, env.DB, "settle");
+        if (projId) await showSettlement(ctx, env.DB, projId);
+      });
+
+      bot.command("ledger", async (ctx) => {
+        if (ctx.chat.type === "private") return ctx.reply("Use /ledger inside your group.");
+        const projId = await routeProjectCommand(ctx, env.DB, "ledger");
+        if (projId) await showLedger(ctx, env.DB, projId);
+      });
+
+      bot.command("report", async (ctx) => {
+        if (ctx.chat.type === "private") return ctx.reply("Use /report inside your group.");
+        const projId = await routeProjectCommand(ctx, env.DB, "report");
+        if (projId) await showReport(ctx, env.DB, projId);
+      });
+
+      bot.command("history", async (ctx) => {
+        if (ctx.chat.type === "private") return ctx.reply("Use /history inside your group.");
+        const projects = await getAllProjects(env.DB, ctx.chat.id);
+        if (projects.length === 0) return ctx.reply("No projects found for this group.");
+
+        const kb = new InlineKeyboard();
+        for (const p of projects) {
+          const statusIcon = p.status === "active" ? "🟢" : "🔒";
+          kb.text(`${statusIcon} ${p.name} (${p.currency})`, `selproj_report_${p.id}_`).row();
+        }
+        await ctx.reply("📜 <b>Project History:</b>\nSelect any project to view its full report:", { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      bot.command("end", async (ctx) => {
+        if (ctx.chat.type === "private") return ctx.reply("Use /end inside your group.");
+        const active = await getActiveProjects(env.DB, ctx.chat.id);
+        if (active.length === 0) return ctx.reply("No active projects to close.");
+
+        const kb = new InlineKeyboard();
+        for (const p of active) {
+          kb.text(`Close: ${p.name}`, `endproj_${p.id}`).row();
+        }
+        await ctx.reply("⚠️ <b>Select a project to close:</b>\n(Note: All balances must be settled first)", { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      // ====================================================
+      // 2. GLOBAL MESSAGE CATCHER (FOR REPLIES) - MUST BE AFTER COMMANDS
+      // ====================================================
+      
+      bot.on("message:text", async (ctx, next) => {
+        const replyTo = ctx.message.reply_to_message;
+        // If not a reply, let Grammy check other routes!
+        if (!replyTo || !replyTo.text) return next();
+
+        // Catch missing argument prompts
         const actionMatch = replyTo.text.match(/\[Action:\s*([^\]]+)\]/);
         if (actionMatch) {
           const action = actionMatch[1];
@@ -218,10 +274,10 @@ export default {
           if (action === "init_prompt") return processInit(ctx, args);
           if (action === "expense_prompt") return processExpense(ctx, args);
           if (action === "pay_prompt") return processPay(ctx, args);
-          return;
+          return next();
         }
 
-        // 2. Catch Unequal Split Arrays
+        // Catch Unequal Split Arrays
         const draftMatch = replyTo.text.match(/\[Draft:\s*(exp_[^\]]+)\]/);
         if (draftMatch) {
           const draftId = draftMatch[1];
@@ -261,9 +317,14 @@ export default {
           userShares.forEach(s => reportMsg += `• ${s.name}: ${s.amount}\n`);
           return ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
         }
+
+        // If it was a reply but not matching anything we care about, let it pass
+        return next();
       });
 
-      // --- PROJECT & CALLBACK LOGIC ---
+      // ====================================================
+      // 3. CALLBACK QUERY HANDLERS (BUTTON CLICKS)
+      // ====================================================
 
       bot.callbackQuery(/join_(\d+)/, async (ctx) => {
         const projectId = Number(ctx.match[1]);
@@ -279,16 +340,6 @@ export default {
         await ctx.editMessageText("✅ Group locked. You can now log expenses with /expense.");
         await ctx.answerCallbackQuery();
       });
-
-      async function routeProjectCommand(ctx: Context, action: string, payload: string = "") {
-        const active = await getActiveProjects(env.DB, ctx.chat!.id);
-        if (active.length === 0) { await ctx.reply("❌ No active projects."); return null; }
-        if (active.length === 1) return active[0].id;
-        const kb = new InlineKeyboard();
-        for (const p of active) kb.text(`${p.name} (${p.currency})`, `selproj_${action}_${p.id}_${payload}`).row();
-        await ctx.reply("📁 Choose a project:", { reply_markup: kb });
-        return null;
-      }
 
       bot.callbackQuery(/selproj_exp_(\d+)_(exp_.+)/, async (ctx) => {
         const draft = await getDraft(env.DB, ctx.match[2]);
@@ -372,7 +423,6 @@ export default {
       });
 
       // --- PAY CALLBACKS ---
-      
       bot.callbackQuery(/selproj_pay_(\d+)_(pay_.+)/, async (ctx) => {
         const draft = await getDraft(env.DB, ctx.match[2]);
         draft.projectId = Number(ctx.match[1]);
@@ -408,7 +458,6 @@ export default {
       });
 
       // --- DELETE / UNDO HANDLERS ---
-      
       bot.callbackQuery(/delexp_(\d+)_(\d+)/, async (ctx) => {
         const expId = Number(ctx.match[1]);
         await env.DB.prepare("DELETE FROM expense_splits WHERE expense_id = ?").bind(expId).run();
@@ -422,16 +471,9 @@ export default {
         await ctx.editMessageText("🗑️ <i>Payment deleted successfully.</i>", { parse_mode: "HTML" });
       });
 
-      // --- BALANCE, SETTLE, REPORT, LEDGER, HISTORY & END ---
+      // --- CALLBACKS FOR BALANCES, SETTLE, LEDGER, REPORT & END ---
       
-      bot.command("balances", async (ctx) => {
-        if (ctx.chat.type === "private") return;
-        const projId = await routeProjectCommand(ctx, "bal");
-        if (projId) await showBalancesMenu(ctx, env.DB, projId);
-      });
-
       bot.callbackQuery(/selproj_bal_(\d+)_/, async (ctx) => await showBalancesMenu(ctx, env.DB, Number(ctx.match[1])));
-      
       async function showBalancesMenu(ctx: Context, db: D1Database, projId: number) {
         const members = await getProjectMembers(db, projId);
         const proj = await getProjectById(db, projId);
@@ -471,14 +513,7 @@ export default {
         await ctx.answerCallbackQuery();
       });
 
-      bot.command("settle", async (ctx) => {
-        if (ctx.chat.type === "private") return;
-        const projId = await routeProjectCommand(ctx, "settle");
-        if (projId) await showSettlement(ctx, env.DB, projId);
-      });
-
       bot.callbackQuery(/selproj_settle_(\d+)_/, async (ctx) => await showSettlement(ctx, env.DB, Number(ctx.match[1])));
-      
       async function showSettlement(ctx: Context, db: D1Database, projId: number) {
         const proj = await getProjectById(db, projId);
         const { netBalances, names } = await calculateBalances(db, projId);
@@ -489,14 +524,7 @@ export default {
         ctx.callbackQuery ? await ctx.editMessageText(report, { parse_mode: "HTML" }) : await ctx.reply(report, { parse_mode: "HTML" });
       }
 
-      bot.command("ledger", async (ctx) => {
-        if (ctx.chat.type === "private") return;
-        const projId = await routeProjectCommand(ctx, "ledger");
-        if (projId) await showLedger(ctx, env.DB, projId);
-      });
-
       bot.callbackQuery(/selproj_ledger_(\d+)/, async (ctx) => await showLedger(ctx, env.DB, Number(ctx.match[1])));
-      
       async function showLedger(ctx: Context, db: D1Database, projId: number) {
         const { results: exps } = await db.prepare("SELECT * FROM expenses WHERE project_id = ? ORDER BY id DESC LIMIT 5").bind(projId).all();
         const { results: pays } = await db.prepare("SELECT * FROM settlements WHERE project_id = ? ORDER BY id DESC LIMIT 5").bind(projId).all();
@@ -506,12 +534,6 @@ export default {
         const text = hasData ? "📖 <b>Recent Ledger:</b>\nTap the ❌ next to an item to delete it permanently." : "📖 Ledger is empty.";
         ctx.callbackQuery ? await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }) : await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
-
-      bot.command("report", async (ctx) => {
-        if (ctx.chat.type === "private") return;
-        const projId = await routeProjectCommand(ctx, "report");
-        if (projId) await showReport(ctx, env.DB, projId);
-      });
 
       bot.callbackQuery(/selproj_report_(\d+)_/, async (ctx) => {
         await showReport(ctx, env.DB, Number(ctx.match[1]));
@@ -539,31 +561,6 @@ export default {
         ctx.callbackQuery ? await ctx.editMessageText(msg, { parse_mode: "HTML" }) : await ctx.reply(msg, { parse_mode: "HTML" });
       }
 
-      bot.command("history", async (ctx) => {
-        if (ctx.chat.type === "private") return ctx.reply("Use /history inside your group.");
-        const projects = await getAllProjects(env.DB, ctx.chat.id);
-        if (projects.length === 0) return ctx.reply("No projects found for this group.");
-
-        const kb = new InlineKeyboard();
-        for (const p of projects) {
-          const statusIcon = p.status === "active" ? "🟢" : "🔒";
-          kb.text(`${statusIcon} ${p.name} (${p.currency})`, `selproj_report_${p.id}_`).row();
-        }
-        await ctx.reply("📜 <b>Project History:</b>\nSelect any project to view its full report:", { parse_mode: "HTML", reply_markup: kb });
-      });
-
-      bot.command("end", async (ctx) => {
-        if (ctx.chat.type === "private") return ctx.reply("Use /end inside your group.");
-        const active = await getActiveProjects(env.DB, ctx.chat.id);
-        if (active.length === 0) return ctx.reply("No active projects to close.");
-
-        const kb = new InlineKeyboard();
-        for (const p of active) {
-          kb.text(`Close: ${p.name}`, `endproj_${p.id}`).row();
-        }
-        await ctx.reply("⚠️ <b>Select a project to close:</b>\n(Note: All balances must be settled first)", { parse_mode: "HTML", reply_markup: kb });
-      });
-
       bot.callbackQuery(/endproj_(\d+)/, async (ctx) => {
         const projId = Number(ctx.match[1]);
         const proj = await getProjectById(env.DB, projId);
@@ -583,11 +580,8 @@ export default {
         await ctx.answerCallbackQuery();
       });
 
-      // --- FINALIZE WEBHOOK ---
       return webhookCallback(bot, "cloudflare-mod")(request);
     }
-    
-    // Fallback response for GET requests (checking if worker is alive)
     return new Response("Bot is active.", { status: 200 });
   },
 };
