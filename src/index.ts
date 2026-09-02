@@ -35,14 +35,59 @@ async function deleteDraft(db: D1Database, key: string) {
   await db.prepare("DELETE FROM drafts WHERE id = ?").bind(key).run();
 }
 
+// NATIVE MATH EVALUATOR (Cloudflare safe, no eval/new Function)
 function safeEval(expr: string): number {
-  try {
-    const sanitized = expr.replace(/[^0-9+\-*/().]/g, '');
-    if (!sanitized) return 0;
-    return Number(new Function(`return ${sanitized}`)());
-  } catch {
-    return NaN;
+  // 1. Convert Persian and Arabic numerals to English digits
+  const persian = [/۰/g, /۱/g, /۲/g, /۳/g, /۴/g, /۵/g, /۶/g, /۷/g, /۸/g, /۹/g];
+  const arabic  = [/٠/g, /١/g, /٢/g, /٣/g, /٤/g, /٥/g, /٦/g, /٧/g, /٨/g, /٩/g];
+  for (let i = 0; i < 10; i++) {
+    expr = expr.replace(persian[i], i.toString()).replace(arabic[i], i.toString());
   }
+
+  // 2. Strip invalid characters
+  expr = expr.replace(/[^0-9+\-*/().]/g, '');
+  if (!expr) return NaN;
+
+  // 3. Recursive Descent Parser
+  let pos = 0;
+
+  function parseExpression(): number {
+    let val = parseTerm();
+    while (pos < expr.length) {
+      if (expr[pos] === '+') { pos++; val += parseTerm(); }
+      else if (expr[pos] === '-') { pos++; val -= parseTerm(); }
+      else break;
+    }
+    return val;
+  }
+
+  function parseTerm(): number {
+    let val = parseFactor();
+    while (pos < expr.length) {
+      if (expr[pos] === '*') { pos++; val *= parseFactor(); }
+      else if (expr[pos] === '/') { pos++; val /= parseFactor(); }
+      else break;
+    }
+    return val;
+  }
+
+  function parseFactor(): number {
+    if (expr[pos] === '+') { pos++; return parseFactor(); }
+    if (expr[pos] === '-') { pos++; return -parseFactor(); }
+    if (expr[pos] === '(') {
+      pos++;
+      let val = parseExpression();
+      if (expr[pos] === ')') pos++;
+      return val;
+    }
+    let start = pos;
+    while (pos < expr.length && /[0-9.]/.test(expr[pos])) pos++;
+    const numStr = expr.substring(start, pos);
+    return numStr ? parseFloat(numStr) : NaN;
+  }
+
+  const result = parseExpression();
+  return isNaN(result) ? NaN : result;
 }
 
 async function calculateBalances(db: D1Database, projectId: number) {
@@ -126,7 +171,8 @@ export default {
       const processNew = async (ctx: Context, args: string[]) => {
         if (!ctx.chat) return;
         if (!args || args.length === 0) return ctx.reply("❌ Missing project name.");
-        const name = args[0]; const currency = args[1] || "";
+        const name = args[0]; 
+        const currency = args[1] || "";
         const proj = await env.DB.prepare("INSERT INTO projects (chat_id, name, currency) VALUES (?, ?, ?) RETURNING id").bind(ctx.chat.id, name, currency).first() as any;
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(proj.id, ctx.from!.id, ctx.from!.first_name).run();
 
@@ -137,7 +183,7 @@ export default {
       const processAdd = async (ctx: Context, args: string[]) => {
         if (!ctx.chat) return;
         if (!args || args.length === 0) return ctx.reply("❌ Missing expense amount.");
-        const amount = parseFloat(args[0]);
+        const amount = safeEval(args[0]); // Works securely via AST parser
         if (isNaN(amount)) return ctx.reply("❌ Invalid amount provided.");
         
         let desc = args.slice(1).join(" ");
@@ -154,7 +200,7 @@ export default {
       const processPay = async (ctx: Context, args: string[]) => {
         if (!ctx.chat) return;
         if (!args || args.length === 0) return ctx.reply("❌ Missing payment amount.");
-        const amount = parseFloat(args[0]);
+        const amount = safeEval(args[0]);
         if (isNaN(amount) || amount <= 0) return ctx.reply("❌ Invalid payment amount.");
         const draftId = `pay_${ctx.chat.id}_${Date.now()}`;
         const projId = await routeProjectCommand(ctx, env.DB, "pay", draftId);
@@ -272,12 +318,11 @@ export default {
       });
 
       // ====================================================
-      // 2. GLOBAL MESSAGE CATCHER (FOR REPLIES) - MUST BE AFTER COMMANDS
+      // 2. GLOBAL MESSAGE CATCHER (FOR REPLIES)
       // ====================================================
       
       bot.on("message:text", async (ctx, next) => {
         const replyTo = ctx.message.reply_to_message;
-        // If not a reply, let Grammy check other routes!
         if (!replyTo || !replyTo.text) return next();
 
         // Catch missing argument prompts
@@ -299,8 +344,12 @@ export default {
           const draft = await getDraft(env.DB, draftId);
           if (!draft || !draft.splitOrder) return ctx.reply("❌ This split session has expired or was already saved.");
 
+          // Normalize spaces around operators before splitting
+          // e.g. "800 + 4000  2000 - 200" => "800+4000  2000-200"
           const inputText = ctx.message.text.trim();
-          const entries = inputText.split(/[,\s]+/).filter(e => e.length > 0);
+          const normalizedText = inputText.replace(/\s*([+\-*/()])\s*/g, '$1');
+          const entries = normalizedText.split(/[,\s]+/).filter(e => e.length > 0);
+
           if (entries.length !== draft.splitOrder.length) {
             return ctx.reply(`❌ I need exactly ${draft.splitOrder.length} numbers. You provided ${entries.length}.`);
           }
@@ -312,6 +361,7 @@ export default {
           for (let i = 0; i < entries.length; i++) {
             const userId = draft.splitOrder[i];
             const member = members.find(m => m.user_id === userId);
+            
             const amt = safeEval(entries[i]);
             if (isNaN(amt) || amt < 0) return ctx.reply(`❌ Invalid math: '${entries[i]}'`);
             
@@ -333,7 +383,6 @@ export default {
           return ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
         }
 
-        // If it was a reply but not matching anything we care about, let it pass
         return next();
       });
 
