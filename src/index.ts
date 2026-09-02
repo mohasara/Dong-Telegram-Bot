@@ -112,9 +112,9 @@ export default {
       const bot = new Bot(env.BOT_TOKEN);
 
       // --- INTERNAL COMMAND PROCESSORS ---
-      // We extract these so we can call them from one-line commands OR reply prompts
       
       const processInit = async (ctx: Context, args: string[]) => {
+        if (!args || args.length === 0) return ctx.reply("❌ Missing project name.");
         const name = args[0]; const currency = args[1] || "$";
         const proj = await env.DB.prepare("INSERT INTO projects (chat_id, name, currency) VALUES (?, ?, ?) RETURNING id").bind(ctx.chat.id, name, currency).first() as any;
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(proj.id, ctx.from!.id, ctx.from!.first_name).run();
@@ -124,6 +124,7 @@ export default {
       };
 
       const processExpense = async (ctx: Context, args: string[]) => {
+        if (!args || args.length === 0) return ctx.reply("❌ Missing expense amount.");
         const amount = parseFloat(args[0]);
         if (isNaN(amount)) return ctx.reply("❌ Invalid amount provided.");
         
@@ -140,6 +141,7 @@ export default {
       };
 
       const processPay = async (ctx: Context, args: string[]) => {
+        if (!args || args.length === 0) return ctx.reply("❌ Missing payment amount.");
         const amount = parseFloat(args[0]);
         if (isNaN(amount) || amount <= 0) return ctx.reply("❌ Invalid payment amount.");
         const draftId = `pay_${ctx.chat.id}_${Date.now()}`;
@@ -148,11 +150,30 @@ export default {
         if (projId) await promptPaySender(ctx, env.DB, draftId, projId, amount);
       };
 
-      // --- COMMAND HANDLERS ---
+      // --- STANDARD COMMAND HANDLERS ---
 
       bot.command("start", async (ctx) => {
         if (ctx.chat.type === "private") return ctx.reply("👋 Welcome to Dong Split Bot!\n\nAdd me to a group to manage trips.\nUse /mybalance here to see what you owe.");
         await ctx.reply("👋 Dong Bot is active!\n\nCreate a project with: <code>/init &lt;Name&gt; &lt;Currency&gt;</code>", { parse_mode: "HTML" });
+      });
+
+      bot.command("mybalance", async (ctx) => {
+        if (ctx.chat.type !== "private") return ctx.reply("Use /balances inside your group, or use /mybalance in private chat.");
+        const userId = ctx.from!.id;
+        const { results: memberships } = await env.DB.prepare(
+          "SELECT p.id, p.name, p.currency FROM project_members pm JOIN projects p ON pm.project_id = p.id WHERE pm.user_id = ? AND p.status = 'active'"
+        ).bind(userId).all();
+
+        if (!memberships || memberships.length === 0) return ctx.reply("You are not part of any active projects.");
+
+        let report = `👤 <b>Your Balances Across All Trips:</b>\n\n`;
+        for (const proj of (memberships as any[])) {
+          const { netBalances } = await calculateBalances(env.DB, proj.id);
+          const bal = netBalances[userId] || 0;
+          const icon = bal >= 0 ? "🟢" : "🔴";
+          report += `${icon} <b>${proj.name}:</b> ${bal >= 0 ? "+" : ""}${bal.toFixed(2)} ${proj.currency}\n`;
+        }
+        await ctx.reply(report, { parse_mode: "HTML" });
       });
 
       bot.command("init", async (ctx) => {
@@ -182,13 +203,13 @@ export default {
         await processPay(ctx, args);
       });
 
-      // --- GLOBAL MESSAGE CATCHER (FOR REPLIES) ---
+      // --- GLOBAL MESSAGE CATCHER (FOR ALL REPLIES) ---
       
       bot.on("message:text", async (ctx) => {
         const replyTo = ctx.message.reply_to_message;
         if (!replyTo || !replyTo.text) return;
 
-        // 1. Catch missing argument prompts (Action Prompts)
+        // 1. Catch missing argument prompts
         const actionMatch = replyTo.text.match(/\[Action:\s*([^\]]+)\]/);
         if (actionMatch) {
           const action = actionMatch[1];
@@ -200,7 +221,7 @@ export default {
           return;
         }
 
-        // 2. Catch Unequal Split Math Arrays (Draft Prompts)
+        // 2. Catch Unequal Split Arrays
         const draftMatch = replyTo.text.match(/\[Draft:\s*(exp_[^\]]+)\]/);
         if (draftMatch) {
           const draftId = draftMatch[1];
@@ -401,14 +422,16 @@ export default {
         await ctx.editMessageText("🗑️ <i>Payment deleted successfully.</i>", { parse_mode: "HTML" });
       });
 
-      // --- BALANCE AND SETTLE ROUTING (Preserved) ---
+      // --- BALANCE, SETTLE, REPORT, LEDGER, HISTORY & END ---
       
       bot.command("balances", async (ctx) => {
         if (ctx.chat.type === "private") return;
         const projId = await routeProjectCommand(ctx, "bal");
         if (projId) await showBalancesMenu(ctx, env.DB, projId);
       });
+
       bot.callbackQuery(/selproj_bal_(\d+)_/, async (ctx) => await showBalancesMenu(ctx, env.DB, Number(ctx.match[1])));
+      
       async function showBalancesMenu(ctx: Context, db: D1Database, projId: number) {
         const members = await getProjectMembers(db, projId);
         const proj = await getProjectById(db, projId);
@@ -453,7 +476,9 @@ export default {
         const projId = await routeProjectCommand(ctx, "settle");
         if (projId) await showSettlement(ctx, env.DB, projId);
       });
+
       bot.callbackQuery(/selproj_settle_(\d+)_/, async (ctx) => await showSettlement(ctx, env.DB, Number(ctx.match[1])));
+      
       async function showSettlement(ctx: Context, db: D1Database, projId: number) {
         const proj = await getProjectById(db, projId);
         const { netBalances, names } = await calculateBalances(db, projId);
@@ -469,7 +494,9 @@ export default {
         const projId = await routeProjectCommand(ctx, "ledger");
         if (projId) await showLedger(ctx, env.DB, projId);
       });
+
       bot.callbackQuery(/selproj_ledger_(\d+)/, async (ctx) => await showLedger(ctx, env.DB, Number(ctx.match[1])));
+      
       async function showLedger(ctx: Context, db: D1Database, projId: number) {
         const { results: exps } = await db.prepare("SELECT * FROM expenses WHERE project_id = ? ORDER BY id DESC LIMIT 5").bind(projId).all();
         const { results: pays } = await db.prepare("SELECT * FROM settlements WHERE project_id = ? ORDER BY id DESC LIMIT 5").bind(projId).all();
@@ -480,9 +507,6 @@ export default {
         ctx.callbackQuery ? await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }) : await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      return webhookCallback(bot, "cloudflare-mod")(request);
-    }
-    // --- /REPORT COMMAND ---
       bot.command("report", async (ctx) => {
         if (ctx.chat.type === "private") return;
         const projId = await routeProjectCommand(ctx, "report");
@@ -515,7 +539,6 @@ export default {
         ctx.callbackQuery ? await ctx.editMessageText(msg, { parse_mode: "HTML" }) : await ctx.reply(msg, { parse_mode: "HTML" });
       }
 
-      // --- /HISTORY COMMAND ---
       bot.command("history", async (ctx) => {
         if (ctx.chat.type === "private") return ctx.reply("Use /history inside your group.");
         const projects = await getAllProjects(env.DB, ctx.chat.id);
@@ -529,7 +552,6 @@ export default {
         await ctx.reply("📜 <b>Project History:</b>\nSelect any project to view its full report:", { parse_mode: "HTML", reply_markup: kb });
       });
 
-      // --- /END COMMAND ---
       bot.command("end", async (ctx) => {
         if (ctx.chat.type === "private") return ctx.reply("Use /end inside your group.");
         const active = await getActiveProjects(env.DB, ctx.chat.id);
@@ -547,7 +569,6 @@ export default {
         const proj = await getProjectById(env.DB, projId);
         const { netBalances } = await calculateBalances(env.DB, projId);
 
-        // Check if anyone has a balance greater than 0.01 (cents)
         const unsettled = Object.values(netBalances).some(b => Math.abs(b) > 0.01);
         if (unsettled) {
           await ctx.editMessageText(
@@ -561,6 +582,12 @@ export default {
         await ctx.editMessageText(`🔒 <b>Project ${proj.name} is now officially closed and archived.</b>`, { parse_mode: "HTML" });
         await ctx.answerCallbackQuery();
       });
+
+      // --- FINALIZE WEBHOOK ---
+      return webhookCallback(bot, "cloudflare-mod")(request);
+    }
+    
+    // Fallback response for GET requests (checking if worker is alive)
     return new Response("Bot is active.", { status: 200 });
   },
 };
