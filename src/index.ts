@@ -76,17 +76,30 @@ async function deleteDraft(db: D1Database, key: string) {
   await db.prepare("DELETE FROM drafts WHERE id = ?").bind(key).run();
 }
 
+function escapeHtml(str: string): string {
+  if (!str) return "";
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 async function deleteMessages(ctx: Context, chatId: number, messageIds: (number | undefined | null)[]) {
   const uniqueIds = Array.from(new Set(messageIds.filter((id): id is number => typeof id === 'number' && id > 0)));
   if (uniqueIds.length === 0) return;
-  try {
-    await ctx.api.deleteMessages(chatId, uniqueIds);
-  } catch (_) {
-    await Promise.all(uniqueIds.map(async (msgId) => {
-      try {
-        await ctx.api.deleteMessage(chatId, msgId);
-      } catch (_) {}
-    }));
+  for (let i = 0; i < uniqueIds.length; i += 100) {
+    const chunk = uniqueIds.slice(i, i + 100);
+    try {
+      await ctx.api.deleteMessages(chatId, chunk);
+    } catch (_) {
+      await Promise.all(chunk.map(async (msgId) => {
+        try {
+          await ctx.api.deleteMessage(chatId, msgId);
+        } catch (_) {}
+      }));
+    }
   }
 }
 
@@ -136,7 +149,7 @@ function safeEval(expr: string): number {
   }
 
   const result = parseExpression();
-  if (pos < expr.length) return NaN;
+  if (pos < expr.length || !isFinite(result)) return NaN;
   return isNaN(result) ? NaN : result;
 }
 
@@ -230,7 +243,7 @@ function getSettlementTransactions(netBalances: Record<number, number>) {
 
 function solveSettlement(netBalances: Record<number, number>, names: Record<number, string>, currency: string) {
   const txs = getSettlementTransactions(netBalances);
-  return txs.map(t => `💸 <b>${names[t.from] || 'Unknown'}</b> ➔ <b>${names[t.to] || 'Unknown'}</b>: ${t.amount.toFixed(2)}${currency ? ' ' + currency : ''}`);
+  return txs.map(t => `💸 <b>${escapeHtml(names[t.from] || 'Unknown')}</b> ➔ <b>${escapeHtml(names[t.to] || 'Unknown')}</b>: ${t.amount.toFixed(2)}${currency ? ' ' + escapeHtml(currency) : ''}`);
 }
 
 async function routeProjectCommand(ctx: Context, db: D1Database, action: string, payload: string = "", cmdMsgId: number = 0): Promise<{ projectId: number | null }> {
@@ -263,6 +276,9 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "POST") {
       const bot = new Bot(env.BOT_TOKEN);
+      bot.catch((err) => {
+        console.error("Unhandled error in bot handler:", err.error || err);
+      });
 
       const processNew = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
         if (!ctx.chat) return;
@@ -272,8 +288,8 @@ export default {
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(proj.id, ctx.from!.id, ctx.from!.first_name).run();
 
         const mainCmdId = initialMsgIds.find(id => id > 0) || 0;
-        const kb = new InlineKeyboard().text("✋ Join Project", `join_${proj.id}`).text("✅ Done Adding", `join_done_${proj.id}_${mainCmdId}`);
-        await ctx.reply(`🎉 Project <b>${name}</b>${currency ? ' (' + currency + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${ctx.from!.first_name}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${proj.id}]</span>`, { parse_mode: "HTML", reply_markup: kb });
+        const kb = new InlineKeyboard().text("✋ Join Project", mainCmdId ? `join_${proj.id}_${mainCmdId}` : `join_${proj.id}`).text("✅ Done Adding", mainCmdId ? `join_done_${proj.id}_${mainCmdId}` : `join_done_${proj.id}`);
+        await ctx.reply(`🎉 Project <b>${escapeHtml(name)}</b>${currency ? ' (' + escapeHtml(currency) + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${escapeHtml(ctx.from!.first_name)}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${proj.id}_${mainCmdId}]</span>`, { parse_mode: "HTML", reply_markup: kb });
 
         if (initialMsgIds.length > 0) {
           await deleteMessages(ctx, ctx.chat.id, initialMsgIds);
@@ -286,7 +302,7 @@ export default {
         const { mathExpr, desc: parsedDesc } = parseMathInput(raw);
         if (!mathExpr) return ctx.reply("❌ Missing expense amount.");
         const evaluated = safeEval(mathExpr);
-        if (isNaN(evaluated) || evaluated <= 0) return ctx.reply(`❌ Invalid math or amount: '<code>${mathExpr}</code>'`, { parse_mode: "HTML" });
+        if (isNaN(evaluated) || !isFinite(evaluated) || evaluated <= 0) return ctx.reply(`❌ Invalid math or amount: '<code>${escapeHtml(mathExpr)}</code>'`, { parse_mode: "HTML" });
         const amount = Math.round(evaluated * 100) / 100;
         
         let desc = parsedDesc;
@@ -306,7 +322,7 @@ export default {
         const { mathExpr } = parseMathInput(raw);
         if (!mathExpr) return ctx.reply("❌ Missing payment amount.");
         const evaluated = safeEval(mathExpr);
-        if (isNaN(evaluated) || evaluated <= 0) return ctx.reply(`❌ Invalid math or amount: '<code>${mathExpr}</code>'`, { parse_mode: "HTML" });
+        if (isNaN(evaluated) || !isFinite(evaluated) || evaluated <= 0) return ctx.reply(`❌ Invalid math or amount: '<code>${escapeHtml(mathExpr)}</code>'`, { parse_mode: "HTML" });
         const amount = Math.round(evaluated * 100) / 100;
         const draftId = `pay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
         const { projectId } = await routeProjectCommand(ctx, env.DB, "pay", draftId);
@@ -321,7 +337,24 @@ export default {
       bot.command("start", async (ctx) => {
         if (!ctx.chat) return;
         if (ctx.chat.type === "private") return ctx.reply("👋 Welcome to Dong Split Bot!\n\nAdd me to a group to manage shared expenses.\nUse /mybalance here to see what you owe.");
-        await ctx.reply("👋 Dong Bot is active!\n\nCreate a project with: <code>/new &lt;Name&gt; [Currency]</code>", { parse_mode: "HTML" });
+        await ctx.reply("👋 Dong Bot is active!\n\nCreate a project with: <code>/new &lt;Name&gt; [Currency]</code>\nType /help to see all commands.", { parse_mode: "HTML" });
+      });
+
+      bot.command("help", async (ctx) => {
+        if (!ctx.chat) return;
+        const msg = 
+          `📖 <b>Dong Split Bot Commands:</b>\n\n` +
+          `• <code>/new &lt;Name&gt; [Currency]</code> — Create a new project\n` +
+          `• <code>/add [amount] [desc]</code> — Record a new expense (supports math: <code>5000+2000 Taxi</code>)\n` +
+          `• <code>/pay [amount]</code> — Record a transfer (supports math: <code>10000/2</code>)\n` +
+          `• <code>/balances</code> — View member balances and breakdown\n` +
+          `• <code>/settle</code> — Get optimal debt settlement plan\n` +
+          `• <code>/report</code> — View full group spending report\n` +
+          `• <code>/projects</code> — List all active and closed projects\n` +
+          `• <code>/delete</code> — View recent ledger and delete entries\n` +
+          `• <code>/close</code> — Close and archive a settled project\n` +
+          `• <code>/mybalance</code> — Check your balances in private chat\n`;
+        await ctx.reply(msg, { parse_mode: "HTML" });
       });
 
       bot.command("mybalance", async (ctx) => {
@@ -339,7 +372,7 @@ export default {
           const { netBalances } = await calculateBalances(env.DB, proj.id);
           const bal = netBalances[userId] || 0;
           const icon = bal >= 0 ? "🟢" : "🔴";
-          report += `${icon} <b>${proj.name}:</b> ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''}\n`;
+          report += `${icon} <b>${escapeHtml(proj.name)}:</b> ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
         }
         await ctx.reply(report, { parse_mode: "HTML" });
       });
@@ -454,9 +487,10 @@ export default {
         if (!replyTo || !replyTo.text) return next();
 
         // Catch offline member additions by replying to the project invitation message
-        const joinMatch = replyTo.text.match(/\[Action:\s*project_join_(\d+)\]/);
+        const joinMatch = replyTo.text.match(/\[Action:\s*project_join_(\d+)(?:_(\d+))?\]/);
         if (joinMatch) {
           const projectId = Number(joinMatch[1]);
+          const cmdMsgId = joinMatch[2] ? Number(joinMatch[2]) : 0;
           const proj = await getProjectById(env.DB, projectId);
           if (!proj || proj.status !== "active") return next();
 
@@ -464,9 +498,14 @@ export default {
           if (names.length === 0) return next();
 
           for (const rawName of names) {
+            const cleanName = rawName.slice(0, 32);
+            // Deduplicate members by name
+            const existing = await env.DB.prepare("SELECT id FROM project_members WHERE project_id = ? AND LOWER(name) = LOWER(?)").bind(projectId, cleanName).first();
+            if (existing) continue;
+
             const minRow = await env.DB.prepare("SELECT MIN(user_id) as min_id FROM project_members WHERE project_id = ? AND user_id < 0").bind(projectId).first() as any;
             const nextUserId = (minRow && typeof minRow.min_id === "number" && minRow.min_id < 0) ? minRow.min_id - 1 : -1;
-            await env.DB.prepare("INSERT INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(projectId, nextUserId, rawName).run();
+            await env.DB.prepare("INSERT INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(projectId, nextUserId, cleanName).run();
           }
 
           // Delete the user's name message so group stays clean
@@ -476,12 +515,14 @@ export default {
 
           // Update the project announcement message
           const members = await getProjectMembers(env.DB, projectId);
-          const kb = new InlineKeyboard().text("✋ Join Project", `join_${projectId}`).text("✅ Done Adding", `join_done_${projectId}`);
+          const kb = new InlineKeyboard()
+            .text("✋ Join Project", cmdMsgId ? `join_${projectId}_${cmdMsgId}` : `join_${projectId}`)
+            .text("✅ Done Adding", cmdMsgId ? `join_done_${projectId}_${cmdMsgId}` : `join_done_${projectId}`);
           try {
             await ctx.api.editMessageText(
               ctx.chat.id,
               replyTo.message_id,
-              `🎉 Project <b>${proj.name}</b>${proj.currency ? ' (' + proj.currency + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${members.map(m => m.name).join(", ")}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${projectId}]</span>`,
+              `🎉 Project <b>${escapeHtml(proj.name)}</b>${proj.currency ? ' (' + escapeHtml(proj.currency) + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${members.map(m => escapeHtml(m.name)).join(", ")}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${projectId}_${cmdMsgId}]</span>`,
               { parse_mode: "HTML", reply_markup: kb }
             );
           } catch (_) {}
@@ -533,7 +574,7 @@ export default {
             const member = members.find(m => m.user_id === userId);
             
             const amt = safeEval(entries[i]);
-            if (isNaN(amt) || amt < 0) return ctx.reply(`❌ Invalid math: '${entries[i]}'`);
+            if (isNaN(amt) || !isFinite(amt) || amt < 0) return ctx.reply(`❌ Invalid math: '${escapeHtml(entries[i])}'`);
             
             userShares.push({ userId, amount: amt, name: member?.name || "Unknown" });
             totalSum += amt;
@@ -552,8 +593,8 @@ export default {
           const kb = new InlineKeyboard()
             .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
             .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
-          let reportMsg = `✅ <b>Unequal Expense Saved!</b>\n🧾 <b>${draft.desc}</b> (${draft.amount})\n\n`;
-          userShares.forEach(s => reportMsg += `• ${s.name}: ${s.amount}\n`);
+          let reportMsg = `✅ <b>Unequal Expense Saved!</b>\n🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n\n`;
+          userShares.forEach(s => reportMsg += `• ${escapeHtml(s.name)}: ${s.amount}\n`);
           await ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
 
           // ONLY delete intermediate flow messages AFTER the last message of this flow
@@ -570,16 +611,19 @@ export default {
       // 3. CALLBACK QUERY HANDLERS (BUTTON CLICKS)
       // ====================================================
 
-      bot.callbackQuery(/^join_(\d+)$/, async (ctx) => {
+      bot.callbackQuery(/^join_(\d+)(?:_(\d+))?$/, async (ctx) => {
         const projectId = Number(ctx.match[1]);
+        const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(projectId, ctx.from.id, ctx.from.first_name).run();
         const members = await getProjectMembers(env.DB, projectId);
         const proj = await getProjectById(env.DB, projectId);
         if (proj) {
-          const kb = new InlineKeyboard().text("✋ Join Project", `join_${projectId}`).text("✅ Done Adding", `join_done_${projectId}`);
+          const kb = new InlineKeyboard()
+            .text("✋ Join Project", cmdMsgId ? `join_${projectId}_${cmdMsgId}` : `join_${projectId}`)
+            .text("✅ Done Adding", cmdMsgId ? `join_done_${projectId}_${cmdMsgId}` : `join_done_${projectId}`);
           try {
             await ctx.editMessageText(
-              `🎉 Project <b>${proj.name}</b>${proj.currency ? ' (' + proj.currency + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${members.map(m => m.name).join(", ")}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${projectId}]</span>`,
+              `🎉 Project <b>${escapeHtml(proj.name)}</b>${proj.currency ? ' (' + escapeHtml(proj.currency) + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${members.map(m => escapeHtml(m.name)).join(", ")}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${projectId}_${cmdMsgId}]</span>`,
               { parse_mode: "HTML", reply_markup: kb }
             );
           } catch (_) {}
@@ -635,7 +679,7 @@ export default {
         if (members.length % 2 !== 0) kb.row();
         kb.text("❌ Cancel", `canceldraft_${draftId}`);
 
-        const text = `🧾 <b>${desc}</b> (${amount})\n👉 <b>Who paid?</b>`;
+        const text = `🧾 <b>${escapeHtml(desc)}</b> (${amount})\n👉 <b>Who paid?</b>`;
         if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
         else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
@@ -652,7 +696,7 @@ export default {
 
         kb.text("⚡ Unequal Split", `expunequal_${draftId}`).text("💾 Confirm Equal", `expconfirm_${draftId}`).row();
         kb.text("❌ Cancel", `canceldraft_${draftId}`);
-        await ctx.editMessageText(`🧾 <b>${draft.desc}</b> (${draft.amount})\n<i>Toggle who shares this equally, or choose Unequal:</i>`, { parse_mode: "HTML", reply_markup: kb });
+        await ctx.editMessageText(`🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n<i>Toggle who shares this equally, or choose Unequal:</i>`, { parse_mode: "HTML", reply_markup: kb });
       }
 
       bot.callbackQuery(/^exptoggle_(exp_.+)_(-?\d+)$/, async (ctx) => {
@@ -667,10 +711,14 @@ export default {
       });
 
       bot.callbackQuery(/^expconfirm_(exp_.+)$/, async (ctx) => {
-        await ctx.answerCallbackQuery().catch(() => {});
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
-        if (!draft || !draft.splitWith || draft.splitWith.length === 0) return;
+        if (!draft) return;
+        if (!draft.splitWith || draft.splitWith.length === 0) {
+          await ctx.answerCallbackQuery("Select at least 1 person!").catch(() => {});
+          return;
+        }
+        await ctx.answerCallbackQuery().catch(() => {});
         const share = draft.amount / draft.splitWith.length;
         const exp = await env.DB.prepare("INSERT INTO expenses (project_id, payer_id, amount, description) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.payerId, draft.amount, draft.desc).first() as any;
         for (const uid of draft.splitWith) await env.DB.prepare("INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)").bind(exp.id, uid, share).run();
@@ -680,7 +728,7 @@ export default {
         const kb = new InlineKeyboard()
           .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
           .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
-        await ctx.editMessageText(`✅ <b>Expense Saved!</b>\n🧾 <b>${draft.desc}</b> (${draft.amount})\n\n<i>Split equally between ${draft.splitWith.length} people.</i>`, { parse_mode: "HTML", reply_markup: kb });
+        await ctx.editMessageText(`✅ <b>Expense Saved!</b>\n🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n\n<i>Split equally between ${draft.splitWith.length} people.</i>`, { parse_mode: "HTML", reply_markup: kb });
 
         // Delete previous messages of this flow after showing the last message
         if (ctx.chat && draft.msgIds && draft.msgIds.length > 0) {
@@ -689,14 +737,17 @@ export default {
       });
 
       bot.callbackQuery(/^expunequal_(exp_.+)$/, async (ctx) => {
-        await ctx.answerCallbackQuery().catch(() => {});
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
 
         const members = await getProjectMembers(env.DB, draft.projectId);
         const activeMembers = members.filter(m => draft.splitWith.includes(m.user_id));
-        if (activeMembers.length === 0) return;
+        if (activeMembers.length === 0) {
+          await ctx.answerCallbackQuery("Select at least 1 person!").catch(() => {});
+          return;
+        }
+        await ctx.answerCallbackQuery().catch(() => {});
 
         draft.splitOrder = activeMembers.map(m => m.user_id);
 
@@ -820,7 +871,7 @@ export default {
         const proj = await getProjectById(db, projId);
         if (!proj) return;
         if (members.length === 0) {
-          const text = `📊 <b>Balances for ${proj.name}:</b>\nNo members in this project yet.`;
+          const text = `📊 <b>Balances for ${escapeHtml(proj.name)}:</b>\nNo members in this project yet.`;
           const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
           else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
@@ -835,7 +886,7 @@ export default {
         if (members.length % 2 !== 0) kb.row();
         kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
-        const text = `📊 <b>Balances for ${proj.name}:</b>\nTap a member below to see their detailed breakdown:`;
+        const text = `📊 <b>Balances for ${escapeHtml(proj.name)}:</b>\nTap a member below to see their detailed breakdown:`;
         if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
         else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
@@ -851,25 +902,25 @@ export default {
         const myBal = netBalances[userId] || 0;
         const myName = names[userId] || "Member";
         
-        let msg = `👤 <b>Balance Breakdown for ${myName}</b> (${proj.name})\n\n`;
+        let msg = `👤 <b>Balance Breakdown for ${escapeHtml(myName)}</b> (${escapeHtml(proj.name)})\n\n`;
         const transactions = getSettlementTransactions(netBalances);
         const myDebts = transactions.filter(t => t.from === userId);
         const myCredits = transactions.filter(t => t.to === userId);
 
         if (myDebts.length > 0 || myCredits.length > 0) {
           msg += `🧾 <b>Actionable Debts:</b>\n`;
-          myDebts.forEach(d => msg += `🔴 Owes <b>${d.amount.toFixed(2)}</b> to ${names[d.to] || 'Unknown'}\n`);
-          myCredits.forEach(c => msg += `🟢 Gets <b>${c.amount.toFixed(2)}</b> from ${names[c.from] || 'Unknown'}\n`);
+          myDebts.forEach(d => msg += `🔴 Owes <b>${d.amount.toFixed(2)}</b> to ${escapeHtml(names[d.to] || 'Unknown')}\n`);
+          myCredits.forEach(c => msg += `🟢 Gets <b>${c.amount.toFixed(2)}</b> from ${escapeHtml(names[c.from] || 'Unknown')}\n`);
           msg += `\n`;
         } else {
           msg += `✅ <b>No pending debts!</b>\n\n`;
         }
 
-        msg += `💰 <b>Total Paid Out:</b> ${totalPaid[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + proj.currency : ''}\n`;
-        msg += `🍽️ <b>Total Consumed:</b> ${totalShare[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + proj.currency : ''}\n`;
+        msg += `💰 <b>Total Paid Out:</b> ${totalPaid[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
+        msg += `🍽️ <b>Total Consumed:</b> ${totalShare[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
         msg += `------------------------------------\n`;
-        if (myBal > 0.01) msg += `🟢 <b>Overall Total:</b> Gets back <b>+${myBal.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''}</b>`;
-        else if (myBal < -0.01) msg += `🔴 <b>Overall Total:</b> Owes <b>${myBal.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''}</b>`;
+        if (myBal > 0.01) msg += `🟢 <b>Overall Total:</b> Gets back <b>+${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}</b>`;
+        else if (myBal < -0.01) msg += `🔴 <b>Overall Total:</b> Owes <b>${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}</b>`;
         else msg += `⚪ <b>Overall Total:</b> Settled ($0.00)`;
 
         const backData = cmdMsgId ? `selproj_bal_${projId}_${cmdMsgId}` : `selproj_bal_${projId}`;
@@ -890,7 +941,7 @@ export default {
         if (!proj) return;
         const { netBalances, names } = await calculateBalances(db, projId);
         const steps = solveSettlement(netBalances, names, proj.currency);
-        let report = `⚖️ <b>Optimal Settlement Plan for ${proj.name}:</b>\n\n`;
+        let report = `⚖️ <b>Optimal Settlement Plan for ${escapeHtml(proj.name)}:</b>\n\n`;
         if (steps.length === 0) report += "✅ <b>All settled up!</b> Everyone is at 0 balance.";
         else report += steps.join("\n") + "\n\n<i>Tip: Use /pay to record transfers.</i>";
         const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
@@ -933,14 +984,14 @@ export default {
         const totalExp = expSumRow?.total || 0;
         const countExp = expSumRow?.count || 0;
 
-        let msg = `📈 <b>Full Report: ${proj.name}</b> (${proj.status.toUpperCase()})\n\n`;
-        msg += `💵 <b>Total Expenses:</b> ${totalExp.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''} (${countExp} entries)\n\n`;
+        let msg = `📈 <b>Full Report: ${escapeHtml(proj.name)}</b> (${escapeHtml(proj.status.toUpperCase())})\n\n`;
+        msg += `💵 <b>Total Expenses:</b> ${totalExp.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''} (${countExp} entries)\n\n`;
         msg += `👥 <b>Individual Spending:</b>\n`;
         
         for (const m of members) {
           const paid = totalPaid[m.user_id] || 0;
           const bal = netBalances[m.user_id] || 0;
-          msg += `• <b>${m.name}:</b> Paid ${paid.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''} | Net: ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}\n`;
+          msg += `• <b>${escapeHtml(m.name)}:</b> Paid ${paid.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''} | Net: ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}\n`;
         }
 
         const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
@@ -960,7 +1011,7 @@ export default {
         if (unsettled) {
           const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           await ctx.editMessageText(
-            `❌ <b>Cannot close ${proj.name}!</b>\n\nThere are still unsettled debts. Run /settle to see who needs to pay whom, and log payments with /pay.`,
+            `❌ <b>Cannot close ${escapeHtml(proj.name)}!</b>\n\nThere are still unsettled debts. Run /settle to see who needs to pay whom, and log payments with /pay.`,
             { parse_mode: "HTML", reply_markup: kb }
           );
           if (ctx.chat && cmdMsgId) {
@@ -971,7 +1022,7 @@ export default {
 
         await env.DB.prepare("UPDATE projects SET status = 'ended' WHERE id = ?").bind(projId).run();
         const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-        await ctx.editMessageText(`🔒 <b>Project ${proj.name} is now officially closed and archived.</b>`, { parse_mode: "HTML", reply_markup: kb });
+        await ctx.editMessageText(`🔒 <b>Project ${escapeHtml(proj.name)} is now officially closed and archived.</b>`, { parse_mode: "HTML", reply_markup: kb });
         if (ctx.chat && cmdMsgId) {
           await deleteMessages(ctx, ctx.chat.id, [cmdMsgId]);
         }
