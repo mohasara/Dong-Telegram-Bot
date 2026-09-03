@@ -271,9 +271,9 @@ export default {
         const proj = await env.DB.prepare("INSERT INTO projects (chat_id, name, currency) VALUES (?, ?, ?) RETURNING id").bind(ctx.chat.id, name, currency).first() as any;
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(proj.id, ctx.from!.id, ctx.from!.first_name).run();
 
-        const mainCmdId = initialMsgIds[0] || 0;
+        const mainCmdId = initialMsgIds.find(id => id > 0) || 0;
         const kb = new InlineKeyboard().text("✋ Join Project", `join_${proj.id}`).text("✅ Done Adding", `join_done_${proj.id}_${mainCmdId}`);
-        await ctx.reply(`🎉 Project <b>${name}</b>${currency ? ' (' + currency + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${ctx.from!.first_name}\n\nTap <b>Join Project</b> below:`, { parse_mode: "HTML", reply_markup: kb });
+        await ctx.reply(`🎉 Project <b>${name}</b>${currency ? ' (' + currency + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${ctx.from!.first_name}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${proj.id}]</span>`, { parse_mode: "HTML", reply_markup: kb });
 
         if (initialMsgIds.length > 0) {
           await deleteMessages(ctx, ctx.chat.id, initialMsgIds);
@@ -453,6 +453,41 @@ export default {
         const replyTo = ctx.message.reply_to_message;
         if (!replyTo || !replyTo.text) return next();
 
+        // Catch offline member additions by replying to the project invitation message
+        const joinMatch = replyTo.text.match(/\[Action:\s*project_join_(\d+)\]/);
+        if (joinMatch) {
+          const projectId = Number(joinMatch[1]);
+          const proj = await getProjectById(env.DB, projectId);
+          if (!proj || proj.status !== "active") return next();
+
+          const names = ctx.message.text.trim().split(/[,،\n]+/).map(n => n.trim()).filter(Boolean);
+          if (names.length === 0) return next();
+
+          for (const rawName of names) {
+            const minRow = await env.DB.prepare("SELECT MIN(user_id) as min_id FROM project_members WHERE project_id = ? AND user_id < 0").bind(projectId).first() as any;
+            const nextUserId = (minRow && typeof minRow.min_id === "number" && minRow.min_id < 0) ? minRow.min_id - 1 : -1;
+            await env.DB.prepare("INSERT INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(projectId, nextUserId, rawName).run();
+          }
+
+          // Delete the user's name message so group stays clean
+          if (ctx.chat) {
+            await deleteMessages(ctx, ctx.chat.id, [ctx.message.message_id]);
+          }
+
+          // Update the project announcement message
+          const members = await getProjectMembers(env.DB, projectId);
+          const kb = new InlineKeyboard().text("✋ Join Project", `join_${projectId}`).text("✅ Done Adding", `join_done_${projectId}`);
+          try {
+            await ctx.api.editMessageText(
+              ctx.chat.id,
+              replyTo.message_id,
+              `🎉 Project <b>${proj.name}</b>${proj.currency ? ' (' + proj.currency + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${members.map(m => m.name).join(", ")}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${projectId}]</span>`,
+              { parse_mode: "HTML", reply_markup: kb }
+            );
+          } catch (_) {}
+          return;
+        }
+
         // Catch missing argument prompts
         const actionMatch = replyTo.text.match(/\[Action:\s*(new_prompt|add_prompt|pay_prompt)(?:_(\d+))?\]/);
         if (actionMatch) {
@@ -542,7 +577,12 @@ export default {
         const proj = await getProjectById(env.DB, projectId);
         if (proj) {
           const kb = new InlineKeyboard().text("✋ Join Project", `join_${projectId}`).text("✅ Done Adding", `join_done_${projectId}`);
-          try { await ctx.editMessageText(`🎉 Project <b>${proj.name}</b>${proj.currency ? ' (' + proj.currency + ')' : ''} created!\n\n👥 <b>Members:</b> ${members.map(m => m.name).join(", ")}\n\nTap <b>Join Project</b> below:`, { parse_mode: "HTML", reply_markup: kb }); } catch (_) {}
+          try {
+            await ctx.editMessageText(
+              `🎉 Project <b>${proj.name}</b>${proj.currency ? ' (' + proj.currency + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${members.map(m => m.name).join(", ")}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${projectId}]</span>`,
+              { parse_mode: "HTML", reply_markup: kb }
+            );
+          } catch (_) {}
         }
         await ctx.answerCallbackQuery("Joined!").catch(() => {});
       });
@@ -567,7 +607,7 @@ export default {
         await promptPayerSelection(ctx, env.DB, draftId, draft.projectId, draft.amount, draft.desc);
       });
 
-      bot.callbackQuery(/^exppayer_(exp_.+)_(\d+)$/, async (ctx) => {
+      bot.callbackQuery(/^exppayer_(exp_.+)_(-?\d+)$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
@@ -615,7 +655,7 @@ export default {
         await ctx.editMessageText(`🧾 <b>${draft.desc}</b> (${draft.amount})\n<i>Toggle who shares this equally, or choose Unequal:</i>`, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/^exptoggle_(exp_.+)_(\d+)$/, async (ctx) => {
+      bot.callbackQuery(/^exptoggle_(exp_.+)_(-?\d+)$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
@@ -707,7 +747,7 @@ export default {
         else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/^payfrom_(pay_.+)_(\d+)$/, async (ctx) => {
+      bot.callbackQuery(/^payfrom_(pay_.+)_(-?\d+)$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
@@ -731,7 +771,7 @@ export default {
         await ctx.editMessageText(`💸 <b>Transfer of ${draft.amount}</b>\n👉 <b>Who is receiving?</b>`, { parse_mode: "HTML", reply_markup: kb });
       });
 
-      bot.callbackQuery(/^payto_(pay_.+)_(\d+)$/, async (ctx) => {
+      bot.callbackQuery(/^payto_(pay_.+)_(-?\d+)$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
@@ -800,7 +840,7 @@ export default {
         else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/^baluser_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
+      bot.callbackQuery(/^baluser_(\d+)_(-?\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         const projId = Number(ctx.match[1]);
         const userId = Number(ctx.match[2]);
