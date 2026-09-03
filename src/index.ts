@@ -230,7 +230,8 @@ export default {
         const proj = await env.DB.prepare("INSERT INTO projects (chat_id, name, currency) VALUES (?, ?, ?) RETURNING id").bind(ctx.chat.id, name, currency).first() as any;
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(proj.id, ctx.from!.id, ctx.from!.first_name).run();
 
-        const kb = new InlineKeyboard().text("✋ Join Project", `join_${proj.id}`).text("✅ Done Adding", `join_done_${proj.id}`);
+        const mainCmdId = initialMsgIds[0] || 0;
+        const kb = new InlineKeyboard().text("✋ Join Project", `join_${proj.id}`).text("✅ Done Adding", `join_done_${proj.id}_${mainCmdId}`);
         await ctx.reply(`🎉 Project <b>${name}</b>${currency ? ' (' + currency + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${ctx.from!.first_name}\n\nTap <b>Join Project</b> below:`, { parse_mode: "HTML", reply_markup: kb });
 
         if (initialMsgIds.length > 0) {
@@ -299,25 +300,43 @@ export default {
       bot.command("new", async (ctx) => {
         if (!ctx.chat) return;
         if (ctx.chat.type === "private") return ctx.reply("Please use /new inside a group chat.");
+        const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-        if (args.length === 0) return ctx.reply("Reply to this message with your Project Name and Currency (e.g. <code>Party $</code>):\n\n<span class=\"tg-spoiler\">[Action: new_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
-        await processNew(ctx, args);
+        if (args.length === 0) {
+          return ctx.reply(
+            `Reply to this message with your Project Name and Currency (e.g. <code>Party $</code>):\n\n<span class="tg-spoiler">[Action: new_prompt_${cmdMsgId}]</span>`,
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true } }
+          );
+        }
+        await processNew(ctx, args, cmdMsgId ? [cmdMsgId] : []);
       });
 
       bot.command("add", async (ctx) => {
         if (!ctx.chat) return;
         if (ctx.chat.type === "private") return ctx.reply("Use /add in your group.");
+        const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-        if (args.length === 0) return ctx.reply("Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code>):\n\n<span class=\"tg-spoiler\">[Action: add_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
-        await processAdd(ctx, args, ctx.message ? [ctx.message.message_id] : []);
+        if (args.length === 0) {
+          return ctx.reply(
+            `Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code>):\n\n<span class="tg-spoiler">[Action: add_prompt_${cmdMsgId}]</span>`,
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true } }
+          );
+        }
+        await processAdd(ctx, args, cmdMsgId ? [cmdMsgId] : []);
       });
 
       bot.command("pay", async (ctx) => {
         if (!ctx.chat) return;
         if (ctx.chat.type === "private") return ctx.reply("Use /pay in your group.");
+        const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-        if (args.length === 0) return ctx.reply("Reply to this message with the amount you are transferring (e.g. <code>50000</code>):\n\n<span class=\"tg-spoiler\">[Action: pay_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
-        await processPay(ctx, args, ctx.message ? [ctx.message.message_id] : []);
+        if (args.length === 0) {
+          return ctx.reply(
+            `Reply to this message with the amount you are transferring (e.g. <code>50000</code>):\n\n<span class="tg-spoiler">[Action: pay_prompt_${cmdMsgId}]</span>`,
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true } }
+          );
+        }
+        await processPay(ctx, args, cmdMsgId ? [cmdMsgId] : []);
       });
 
       bot.command("balances", async (ctx) => {
@@ -387,14 +406,18 @@ export default {
         if (!replyTo || !replyTo.text) return next();
 
         // Catch missing argument prompts
-        const actionMatch = replyTo.text.match(/\[Action:\s*([^\]]+)\]/);
+        const actionMatch = replyTo.text.match(/\[Action:\s*([^_\]]+)(?:_(\d+))?\]/);
         if (actionMatch) {
           const action = actionMatch[1];
+          const origCmdId = actionMatch[2] ? Number(actionMatch[2]) : 0;
           const args = ctx.message.text.trim().split(/\s+/).filter(Boolean);
           
           const promptMsgIds = [replyTo.message_id, ctx.message.message_id];
+          if (origCmdId) {
+            promptMsgIds.push(origCmdId);
+          }
           const parentMsgId = (replyTo as any).reply_to_message?.message_id;
-          if (parentMsgId) {
+          if (parentMsgId && !promptMsgIds.includes(parentMsgId)) {
             promptMsgIds.push(parentMsgId);
           }
           
@@ -441,17 +464,18 @@ export default {
           for (const s of userShares) await env.DB.prepare("INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)").bind(exp.id, s.userId, s.amount).run();
           
           await deleteDraft(env.DB, draftId);
+          const allIds = Array.from(new Set([...(draft.msgIds || []), ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
+          const idsPayload = allIds.join("_");
           const kb = new InlineKeyboard()
             .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
-            .text("❌ Close", "closemsg");
+            .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
           let reportMsg = `✅ <b>Unequal Expense Saved!</b>\n🧾 <b>${draft.desc}</b> (${draft.amount})\n\n`;
           userShares.forEach(s => reportMsg += `• ${s.name}: ${s.amount}\n`);
           await ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
 
           // ONLY delete intermediate flow messages AFTER the last message of this flow
-          const toDelete = [...(draft.msgIds || []), ctx.message.message_id];
-          if (ctx.chat) {
-            await deleteMessages(ctx, ctx.chat.id, toDelete);
+          if (ctx.chat && allIds.length > 0) {
+            await deleteMessages(ctx, ctx.chat.id, allIds);
           }
           return;
         }
@@ -475,9 +499,10 @@ export default {
         await ctx.answerCallbackQuery("Joined!").catch(() => {});
       });
 
-      bot.callbackQuery(/^join_done_(\d+)$/, async (ctx) => {
+      bot.callbackQuery(/^join_done_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
-        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
+        const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
+        const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         try {
           await ctx.editMessageText("✅ Group locked. You can now log expenses with /add.", { reply_markup: kb });
         } catch (_) {}
@@ -563,9 +588,10 @@ export default {
         for (const uid of draft.splitWith) await env.DB.prepare("INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)").bind(exp.id, uid, share).run();
         
         await deleteDraft(env.DB, draftId);
+        const idsPayload = (draft.msgIds || []).filter((id: any): id is number => typeof id === "number" && id > 0).join("_");
         const kb = new InlineKeyboard()
           .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
-          .text("❌ Close", "closemsg");
+          .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
         await ctx.editMessageText(`✅ <b>Expense Saved!</b>\n🧾 <b>${draft.desc}</b> (${draft.amount})\n\n<i>Split equally between ${draft.splitWith.length} people.</i>`, { parse_mode: "HTML", reply_markup: kb });
 
         // Delete previous messages of this flow after showing the last message
@@ -664,10 +690,10 @@ export default {
         if (!draft) return;
         const t = await env.DB.prepare("INSERT INTO settlements (project_id, from_user_id, to_user_id, amount) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.fromId, Number(ctx.match[2]), draft.amount).first() as any;
         await deleteDraft(env.DB, draftId);
-        
+        const idsPayload = (draft.msgIds || []).filter((id: any): id is number => typeof id === "number" && id > 0).join("_");
         const kb = new InlineKeyboard()
           .text("↩️ Undo", `delpay_${t.id}_${draft.projectId}`)
-          .text("❌ Close", "closemsg");
+          .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
         await ctx.editMessageText(`✅ <b>Payment Recorded!</b>\nAmount: ${draft.amount}`, { parse_mode: "HTML", reply_markup: kb });
 
         // Delete original command and prompts at the end of the payment flow
@@ -874,11 +900,11 @@ export default {
         }
       });
 
-      bot.callbackQuery(/^closeflow_(\d+)$/, async (ctx) => {
+      bot.callbackQuery(/^closeflow_([0-9_]+)$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
-        const cmdMsgId = Number(ctx.match[1]);
+        const ids = ctx.match[1].split("_").map(Number).filter(n => n > 0);
         const currentMsgId = ctx.callbackQuery.message?.message_id;
-        const toDelete = [currentMsgId, cmdMsgId].filter((id): id is number => typeof id === "number" && id > 0);
+        const toDelete = Array.from(new Set([currentMsgId, ...ids].filter((id): id is number => typeof id === "number" && id > 0)));
         if (ctx.chat && toDelete.length > 0) {
           await deleteMessages(ctx, ctx.chat.id, toDelete);
         }
