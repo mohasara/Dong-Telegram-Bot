@@ -9,15 +9,53 @@ export interface Env {
 // DATABASE & COMPUTATION HELPERS
 // ----------------------------------------------------
 
+function getChatIds(chatId: number): number[] {
+  const ids = new Set<number>();
+  ids.add(chatId);
+  const s = chatId.toString();
+
+  if (s.startsWith("-100")) {
+    const raw = s.slice(4);
+    if (raw) {
+      ids.add(-Number(raw));
+      ids.add(Number(raw));
+    }
+  } else if (s.startsWith("-")) {
+    const raw = s.slice(1);
+    if (raw) {
+      ids.add(-Number(`100${raw}`));
+      ids.add(Number(raw));
+    }
+  } else {
+    ids.add(-chatId);
+    ids.add(-Number(`100${chatId}`));
+    if (s.startsWith("100")) {
+      const raw = s.slice(3);
+      if (raw) {
+        ids.add(Number(raw));
+        ids.add(-Number(raw));
+        ids.add(-Number(`100${raw}`));
+      }
+    }
+  }
+  return Array.from(ids).filter(n => !isNaN(n));
+}
+
 async function getActiveProjects(db: D1Database, chatId: number) {
-  // Support both normal chat IDs and supergroup IDs (-100 prefix)
-  const altChatId = chatId > 0 ? -Number(`100${chatId}`) : chatId;
-  const { results } = await db.prepare("SELECT * FROM projects WHERE (chat_id = ? OR chat_id = ?) AND status = 'active' ORDER BY id DESC").bind(chatId, altChatId).all();
+  const ids = getChatIds(chatId);
+  const placeholders = ids.map(() => "?").join(", ");
+  const { results } = await db.prepare(
+    `SELECT * FROM projects WHERE chat_id IN (${placeholders}) AND status = 'active' ORDER BY id DESC`
+  ).bind(...ids).all();
   return results as any[];
 }
+
 async function getAllProjects(db: D1Database, chatId: number) {
-  const altChatId = chatId > 0 ? -Number(`100${chatId}`) : chatId;
-  const { results } = await db.prepare("SELECT * FROM projects WHERE (chat_id = ? OR chat_id = ?) ORDER BY id DESC").bind(chatId, altChatId).all();
+  const ids = getChatIds(chatId);
+  const placeholders = ids.map(() => "?").join(", ");
+  const { results } = await db.prepare(
+    `SELECT * FROM projects WHERE chat_id IN (${placeholders}) ORDER BY id DESC`
+  ).bind(...ids).all();
   return results as any[];
 }
 async function getProjectById(db: D1Database, projectId: number) {
@@ -36,6 +74,15 @@ async function getDraft(db: D1Database, key: string) {
 }
 async function deleteDraft(db: D1Database, key: string) {
   await db.prepare("DELETE FROM drafts WHERE id = ?").bind(key).run();
+}
+
+async function deleteMessages(ctx: Context, chatId: number, messageIds: (number | undefined | null)[]) {
+  const uniqueIds = Array.from(new Set(messageIds.filter((id): id is number => typeof id === 'number' && id > 0)));
+  await Promise.all(uniqueIds.map(async (msgId) => {
+    try {
+      await ctx.api.deleteMessage(chatId, msgId);
+    } catch (_) {}
+  }));
 }
 
 // NATIVE MATH EVALUATOR
@@ -142,18 +189,21 @@ function getSettlementTransactions(netBalances: Record<number, number>) {
 
 function solveSettlement(netBalances: Record<number, number>, names: Record<number, string>, currency: string) {
   const txs = getSettlementTransactions(netBalances);
-  return txs.map(t => `💸 <b>${names[t.from]}</b> ➔ <b>${names[t.to]}</b>: ${t.amount.toFixed(2)}${currency ? ' ' + currency : ''}`);
+  return txs.map(t => `💸 <b>${names[t.from] || 'Unknown'}</b> ➔ <b>${names[t.to] || 'Unknown'}</b>: ${t.amount.toFixed(2)}${currency ? ' ' + currency : ''}`);
 }
 
-async function routeProjectCommand(ctx: Context, db: D1Database, action: string, payload: string = "") {
-  if (!ctx.chat) return null;
+async function routeProjectCommand(ctx: Context, db: D1Database, action: string, payload: string = ""): Promise<{ projectId: number | null }> {
+  if (!ctx.chat) return { projectId: null };
   const active = await getActiveProjects(db, ctx.chat.id);
-  if (active.length === 0) { await ctx.reply("❌ No active projects."); return null; }
-  if (active.length === 1) return active[0].id;
+  if (active.length === 0) { await ctx.reply("❌ No active projects."); return { projectId: null }; }
+  if (active.length === 1) return { projectId: active[0].id };
   const kb = new InlineKeyboard();
-  for (const p of active) kb.text(`${p.name}${p.currency ? ' (' + p.currency + ')' : ''}`, `selproj_${action}_${p.id}_${payload}`).row();
+  for (const p of active) {
+    const data = payload ? `selproj_${action}_${p.id}_${payload}` : `selproj_${action}_${p.id}`;
+    kb.text(`${p.name}${p.currency ? ' (' + p.currency + ')' : ''}`, data).row();
+  }
   await ctx.reply("📁 Choose a project:", { reply_markup: kb });
-  return null;
+  return { projectId: null };
 }
 
 // ----------------------------------------------------
@@ -165,7 +215,7 @@ export default {
     if (request.method === "POST") {
       const bot = new Bot(env.BOT_TOKEN);
 
-      const processNew = async (ctx: Context, args: string[]) => {
+      const processNew = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
         if (!ctx.chat) return;
         if (!args || args.length === 0) return ctx.reply("❌ Missing project name.");
         const name = args[0]; const currency = args[1] || "";
@@ -174,9 +224,13 @@ export default {
 
         const kb = new InlineKeyboard().text("✋ Join Project", `join_${proj.id}`).text("✅ Done Adding", `join_done_${proj.id}`);
         await ctx.reply(`🎉 Project <b>${name}</b>${currency ? ' (' + currency + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${ctx.from!.first_name}\n\nTap <b>Join Project</b> below:`, { parse_mode: "HTML", reply_markup: kb });
+
+        if (initialMsgIds.length > 0) {
+          await deleteMessages(ctx, ctx.chat.id, initialMsgIds);
+        }
       };
 
-      const processAdd = async (ctx: Context, args: string[]) => {
+      const processAdd = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
         if (!ctx.chat) return;
         if (!args || args.length === 0) return ctx.reply("❌ Missing expense amount.");
         const amount = safeEval(args[0]); 
@@ -187,21 +241,21 @@ export default {
           desc = new Date().toISOString().replace('T', ' ').substring(0, 16); 
         }
 
-        const draftId = `exp_${ctx.chat.id}_${Date.now()}`;
-        const projectId = await routeProjectCommand(ctx, env.DB, "add", `${draftId}`);
-        await saveDraft(env.DB, draftId, { amount, desc, projectId, payerId: null, splitWith: [] });
+        const draftId = `exp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "add", draftId);
+        await saveDraft(env.DB, draftId, { amount, desc, projectId, payerId: null, splitWith: [], msgIds: initialMsgIds });
         if (projectId) await promptPayerSelection(ctx, env.DB, draftId, projectId, amount, desc);
       };
 
-      const processPay = async (ctx: Context, args: string[]) => {
+      const processPay = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
         if (!ctx.chat) return;
         if (!args || args.length === 0) return ctx.reply("❌ Missing payment amount.");
         const amount = safeEval(args[0]);
         if (isNaN(amount) || amount <= 0) return ctx.reply("❌ Invalid payment amount.");
-        const draftId = `pay_${ctx.chat.id}_${Date.now()}`;
-        const projId = await routeProjectCommand(ctx, env.DB, "pay", draftId);
-        await saveDraft(env.DB, draftId, { amount, projectId: projId, fromId: null, toId: null });
-        if (projId) await promptPaySender(ctx, env.DB, draftId, projId, amount);
+        const draftId = `pay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "pay", draftId);
+        await saveDraft(env.DB, draftId, { amount, projectId, fromId: null, toId: null, msgIds: initialMsgIds });
+        if (projectId) await promptPaySender(ctx, env.DB, draftId, projectId, amount);
       };
 
       // ====================================================
@@ -247,7 +301,7 @@ export default {
         if (ctx.chat.type === "private") return ctx.reply("Use /add in your group.");
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) return ctx.reply("Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code>):\n\n<span class=\"tg-spoiler\">[Action: add_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
-        await processAdd(ctx, args);
+        await processAdd(ctx, args, ctx.message ? [ctx.message.message_id] : []);
       });
 
       bot.command("pay", async (ctx) => {
@@ -255,31 +309,31 @@ export default {
         if (ctx.chat.type === "private") return ctx.reply("Use /pay in your group.");
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) return ctx.reply("Reply to this message with the amount you are transferring (e.g. <code>50000</code>):\n\n<span class=\"tg-spoiler\">[Action: pay_prompt]</span>", { parse_mode: "HTML", reply_markup: { force_reply: true } });
-        await processPay(ctx, args);
+        await processPay(ctx, args, ctx.message ? [ctx.message.message_id] : []);
       });
 
       bot.command("balances", async (ctx) => {
         if (!ctx.chat) return;
-        const projId = await routeProjectCommand(ctx, env.DB, "bal");
-        if (projId) await showBalancesMenu(ctx, env.DB, projId);
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "bal");
+        if (projectId) await showBalancesMenu(ctx, env.DB, projectId);
       });
 
       bot.command("settle", async (ctx) => {
         if (!ctx.chat) return;
-        const projId = await routeProjectCommand(ctx, env.DB, "settle");
-        if (projId) await showSettlement(ctx, env.DB, projId);
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "settle");
+        if (projectId) await showSettlement(ctx, env.DB, projectId);
       });
 
       bot.command("delete", async (ctx) => {
         if (!ctx.chat) return;
-        const projId = await routeProjectCommand(ctx, env.DB, "delete");
-        if (projId) await showLedger(ctx, env.DB, projId);
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "delete");
+        if (projectId) await showLedger(ctx, env.DB, projectId);
       });
 
       bot.command("report", async (ctx) => {
         if (!ctx.chat) return;
-        const projId = await routeProjectCommand(ctx, env.DB, "report");
-        if (projId) await showReport(ctx, env.DB, projId);
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "report");
+        if (projectId) await showReport(ctx, env.DB, projectId);
       });
 
       bot.command("projects", async (ctx) => {
@@ -290,7 +344,7 @@ export default {
         const kb = new InlineKeyboard();
         for (const p of projects) {
           const statusIcon = p.status === "active" ? "🟢" : "🔒";
-          kb.text(`${statusIcon} ${p.name}${p.currency ? ' (' + p.currency + ')' : ''}`, `selproj_report_${p.id}_`).row();
+          kb.text(`${statusIcon} ${p.name}${p.currency ? ' (' + p.currency + ')' : ''}`, `selproj_report_${p.id}`).row();
         }
         await ctx.reply("📜 <b>All Projects:</b>\nSelect any project to view its full report:", { parse_mode: "HTML", reply_markup: kb });
       });
@@ -315,23 +369,21 @@ export default {
         const replyTo = ctx.message.reply_to_message;
         if (!replyTo || !replyTo.text) return next();
 
-        const cleanCompletedJob = async () => {
-          if (!ctx.chat) return;
-          try { await ctx.deleteMessage(); } catch (e) {} // delete user's input message
-          try { await ctx.api.deleteMessage(ctx.chat.id, replyTo.message_id); } catch (e) {} // delete bot's prompt message
-        };
-
         // Catch missing argument prompts
         const actionMatch = replyTo.text.match(/\[Action:\s*([^\]]+)\]/);
         if (actionMatch) {
           const action = actionMatch[1];
           const args = ctx.message.text.trim().split(/\s+/).filter(Boolean);
           
-          await cleanCompletedJob(); // Clean up the initial prompt dialog
+          const promptMsgIds = [replyTo.message_id, ctx.message.message_id];
+          const parentMsgId = (replyTo as any).reply_to_message?.message_id;
+          if (parentMsgId) {
+            promptMsgIds.push(parentMsgId);
+          }
           
-          if (action === "new_prompt") return processNew(ctx, args);
-          if (action === "add_prompt") return processAdd(ctx, args);
-          if (action === "pay_prompt") return processPay(ctx, args);
+          if (action === "new_prompt") return processNew(ctx, args, promptMsgIds);
+          if (action === "add_prompt") return processAdd(ctx, args, promptMsgIds);
+          if (action === "pay_prompt") return processPay(ctx, args, promptMsgIds);
           return next();
         }
 
@@ -368,9 +420,6 @@ export default {
             return ctx.reply(`❌ Total mismatch! Your inputs sum to <b>${totalSum}</b>, but the expense is <b>${draft.amount}</b>.`, { parse_mode: "HTML" });
           }
 
-          // ONLY delete the conversational flow messages *after* successful processing
-          await cleanCompletedJob();
-
           const exp = await env.DB.prepare("INSERT INTO expenses (project_id, payer_id, amount, description) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.payerId, draft.amount, draft.desc).first() as any;
           for (const s of userShares) await env.DB.prepare("INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)").bind(exp.id, s.userId, s.amount).run();
           
@@ -378,7 +427,14 @@ export default {
           const kb = new InlineKeyboard().text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`);
           let reportMsg = `✅ <b>Unequal Expense Saved!</b>\n🧾 <b>${draft.desc}</b> (${draft.amount})\n\n`;
           userShares.forEach(s => reportMsg += `• ${s.name}: ${s.amount}\n`);
-          return ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
+          await ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
+
+          // ONLY delete intermediate flow messages AFTER the last message of this flow
+          const toDelete = [...(draft.msgIds || []), ctx.message.message_id];
+          if (ctx.chat) {
+            await deleteMessages(ctx, ctx.chat.id, toDelete);
+          }
+          return;
         }
 
         return next();
@@ -388,90 +444,122 @@ export default {
       // 3. CALLBACK QUERY HANDLERS (BUTTON CLICKS)
       // ====================================================
 
-      bot.callbackQuery(/join_(\d+)/, async (ctx) => {
+      bot.callbackQuery(/^join_(\d+)$/, async (ctx) => {
         const projectId = Number(ctx.match[1]);
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(projectId, ctx.from.id, ctx.from.first_name).run();
         const members = await getProjectMembers(env.DB, projectId);
         const proj = await getProjectById(env.DB, projectId);
-        const kb = new InlineKeyboard().text("✋ Join Project", `join_${projectId}`).text("✅ Done Adding", `join_done_${projectId}`);
-        try { await ctx.editMessageText(`🎉 Project <b>${proj.name}</b>${proj.currency ? ' (' + proj.currency + ')' : ''} created!\n\n👥 <b>Members:</b> ${members.map(m => m.name).join(", ")}\n\nTap <b>Join Project</b> below:`, { parse_mode: "HTML", reply_markup: kb }); } catch (_) {}
-        await ctx.answerCallbackQuery("Joined!");
+        if (proj) {
+          const kb = new InlineKeyboard().text("✋ Join Project", `join_${projectId}`).text("✅ Done Adding", `join_done_${projectId}`);
+          try { await ctx.editMessageText(`🎉 Project <b>${proj.name}</b>${proj.currency ? ' (' + proj.currency + ')' : ''} created!\n\n👥 <b>Members:</b> ${members.map(m => m.name).join(", ")}\n\nTap <b>Join Project</b> below:`, { parse_mode: "HTML", reply_markup: kb }); } catch (_) {}
+        }
+        await ctx.answerCallbackQuery("Joined!").catch(() => {});
       });
 
-      bot.callbackQuery(/join_done_(\d+)/, async (ctx) => {
-        await ctx.editMessageText("✅ Group locked. You can now log expenses with /add.");
-        await ctx.answerCallbackQuery();
+      bot.callbackQuery(/^join_done_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        try {
+          await ctx.editMessageText("✅ Group locked. You can now log expenses with /add.");
+        } catch (_) {}
       });
 
-      bot.callbackQuery(/selproj_add_(\d+)_(exp_.+)/, async (ctx) => {
-        const draft = await getDraft(env.DB, ctx.match[2]);
-        if (!draft) return ctx.answerCallbackQuery("Expired");
+      // --- ADD EXPENSE CALLBACKS ---
+      bot.callbackQuery(/^selproj_add_(\d+)_(exp_.+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[2];
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft) return;
         draft.projectId = Number(ctx.match[1]);
-        await saveDraft(env.DB, ctx.match[2], draft);
-        await promptPayerSelection(ctx, env.DB, ctx.match[2], draft.projectId, draft.amount, draft.desc);
-        await ctx.answerCallbackQuery();
+        await saveDraft(env.DB, draftId, draft);
+        await promptPayerSelection(ctx, env.DB, draftId, draft.projectId, draft.amount, draft.desc);
+      });
+
+      bot.callbackQuery(/^exppayer_(exp_.+)_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[1];
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft) return;
+        draft.payerId = Number(ctx.match[2]);
+        draft.splitWith = (await getProjectMembers(env.DB, draft.projectId)).map(m => m.user_id);
+        await saveDraft(env.DB, draftId, draft);
+        await renderSplitSelection(ctx, env.DB, draftId, draft);
       });
 
       async function promptPayerSelection(ctx: Context, db: D1Database, draftId: string, projId: number, amount: number, desc: string) {
         const members = await getProjectMembers(db, projId);
+        if (members.length === 0) {
+          const text = `❌ <b>No members in this project yet!</b>\nUse /new or tap Join Project first.`;
+          if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML" });
+          else await ctx.reply(text, { parse_mode: "HTML" });
+          return;
+        }
         const kb = new InlineKeyboard();
-        members.forEach(m => kb.text(m.name, `exppayer_${draftId}_${m.user_id}`).row());
+        for (let i = 0; i < members.length; i++) {
+          kb.text(members[i].name, `exppayer_${draftId}_${members[i].user_id}`);
+          if (i % 2 === 1) kb.row();
+        }
+        if (members.length % 2 !== 0) kb.row();
+
         const text = `🧾 <b>${desc}</b> (${amount})\n👉 <b>Who paid?</b>`;
         if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
         else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/exppayer_(exp_.+)_(\d+)/, async (ctx) => {
-        const draftId = ctx.match[1]; const draft = await getDraft(env.DB, draftId);
-        if (!draft) return ctx.answerCallbackQuery("Expired");
-        draft.payerId = Number(ctx.match[2]);
-        draft.splitWith = (await getProjectMembers(env.DB, draft.projectId)).map(m => m.user_id);
-        await saveDraft(env.DB, draftId, draft);
-        await renderSplitSelection(ctx, env.DB, draftId, draft);
-        await ctx.answerCallbackQuery();
-      });
-
       async function renderSplitSelection(ctx: Context, db: D1Database, draftId: string, draft: any) {
         const members = await getProjectMembers(db, draft.projectId);
         const kb = new InlineKeyboard();
-        for (const m of members) {
+        for (let i = 0; i < members.length; i++) {
+          const m = members[i];
           kb.text(`${draft.splitWith.includes(m.user_id) ? "✅" : "❌"} ${m.name}`, `exptoggle_${draftId}_${m.user_id}`);
+          if (i % 2 === 1) kb.row();
         }
-        kb.row().text("⚡ Unequal Split", `expunequal_${draftId}`).text("💾 Confirm Equal", `expconfirm_${draftId}`);
+        if (members.length % 2 !== 0) kb.row();
+
+        kb.text("⚡ Unequal Split", `expunequal_${draftId}`).text("💾 Confirm Equal", `expconfirm_${draftId}`);
         await ctx.editMessageText(`🧾 <b>${draft.desc}</b> (${draft.amount})\n<i>Toggle who shares this equally, or choose Unequal:</i>`, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/exptoggle_(exp_.+)_(\d+)/, async (ctx) => {
-        const draft = await getDraft(env.DB, ctx.match[1]); if (!draft) return;
+      bot.callbackQuery(/^exptoggle_(exp_.+)_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[1];
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft) return;
         const uid = Number(ctx.match[2]);
         draft.splitWith = draft.splitWith.includes(uid) ? draft.splitWith.filter((id: number) => id !== uid) : [...draft.splitWith, uid];
-        await saveDraft(env.DB, ctx.match[1], draft);
-        await renderSplitSelection(ctx, env.DB, ctx.match[1], draft);
+        await saveDraft(env.DB, draftId, draft);
+        await renderSplitSelection(ctx, env.DB, draftId, draft);
       });
 
-      bot.callbackQuery(/expconfirm_(exp_.+)/, async (ctx) => {
-        const draft = await getDraft(env.DB, ctx.match[1]);
-        if (!draft || draft.splitWith.length === 0) return ctx.answerCallbackQuery("Invalid or empty split!");
+      bot.callbackQuery(/^expconfirm_(exp_.+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[1];
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft || !draft.splitWith || draft.splitWith.length === 0) return;
         const share = draft.amount / draft.splitWith.length;
         const exp = await env.DB.prepare("INSERT INTO expenses (project_id, payer_id, amount, description) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.payerId, draft.amount, draft.desc).first() as any;
         for (const uid of draft.splitWith) await env.DB.prepare("INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)").bind(exp.id, uid, share).run();
         
-        await deleteDraft(env.DB, ctx.match[1]);
+        await deleteDraft(env.DB, draftId);
         const kb = new InlineKeyboard().text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`);
-        await ctx.editMessageText(`✅ <b>Expense Added!</b>\n🧾 ${draft.desc} (${draft.amount})\n\n<i>Split equally between ${draft.splitWith.length} people.</i>`, { parse_mode: "HTML", reply_markup: kb });
+        await ctx.editMessageText(`✅ <b>Expense Saved!</b>\n🧾 <b>${draft.desc}</b> (${draft.amount})\n\n<i>Split equally between ${draft.splitWith.length} people.</i>`, { parse_mode: "HTML", reply_markup: kb });
+
+        // Delete previous messages of this flow after showing the last message
+        if (ctx.chat && draft.msgIds && draft.msgIds.length > 0) {
+          await deleteMessages(ctx, ctx.chat.id, draft.msgIds);
+        }
       });
 
-      bot.callbackQuery(/expunequal_(exp_.+)/, async (ctx) => {
+      bot.callbackQuery(/^expunequal_(exp_.+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
-        if (!draft) return ctx.answerCallbackQuery("Expired");
+        if (!draft) return;
 
         const members = await getProjectMembers(env.DB, draft.projectId);
         const activeMembers = members.filter(m => draft.splitWith.includes(m.user_id));
-        if (activeMembers.length === 0) return ctx.answerCallbackQuery("Select at least 1 person first!");
+        if (activeMembers.length === 0) return;
 
         draft.splitOrder = activeMembers.map(m => m.user_id);
-        await saveDraft(env.DB, draftId, draft);
 
         let msg = `⚡ <b>Unequal Split:</b> ${draft.desc} (Total: <b>${draft.amount}</b>)\n\n`;
         msg += `Reply to this message with amounts in this order:\n`;
@@ -479,77 +567,137 @@ export default {
         msg += `\n<i>(e.g., "2000 4000-1000 0")</i>\n\n`;
         msg += `<span class="tg-spoiler">[Draft: ${draftId}]</span>`;
 
-        await ctx.deleteMessage().catch(()=>true);
-        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: { force_reply: true } });
-        await ctx.answerCallbackQuery();
+        // Keep the menu message visible during flow; record it to delete at the end
+        const menuMsgId = ctx.callbackQuery.message?.message_id;
+        const promptMsg = await ctx.reply(msg, { parse_mode: "HTML", reply_markup: { force_reply: true } });
+
+        draft.msgIds = Array.from(new Set([...(draft.msgIds || []), ...(menuMsgId ? [menuMsgId] : []), promptMsg.message_id]));
+        await saveDraft(env.DB, draftId, draft);
       });
 
       // --- PAY CALLBACKS ---
-      bot.callbackQuery(/selproj_pay_(\d+)_(pay_.+)/, async (ctx) => {
-        const draft = await getDraft(env.DB, ctx.match[2]);
+      bot.callbackQuery(/^selproj_pay_(\d+)_(pay_.+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[2];
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft) return;
         draft.projectId = Number(ctx.match[1]);
-        await saveDraft(env.DB, ctx.match[2], draft);
-        await promptPaySender(ctx, env.DB, ctx.match[2], draft.projectId, draft.amount);
+        await saveDraft(env.DB, draftId, draft);
+        await promptPaySender(ctx, env.DB, draftId, draft.projectId, draft.amount);
       });
 
       async function promptPaySender(ctx: Context, db: D1Database, draftId: string, projId: number, amount: number) {
         const members = await getProjectMembers(db, projId);
+        if (members.length === 0) {
+          const text = `❌ <b>No members in this project yet!</b>`;
+          if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML" });
+          else await ctx.reply(text, { parse_mode: "HTML" });
+          return;
+        }
         const kb = new InlineKeyboard();
-        members.forEach(m => kb.text(m.name, `payfrom_${draftId}_${m.user_id}`).row());
+        for (let i = 0; i < members.length; i++) {
+          kb.text(members[i].name, `payfrom_${draftId}_${members[i].user_id}`);
+          if (i % 2 === 1) kb.row();
+        }
+        if (members.length % 2 !== 0) kb.row();
+
         const text = `💸 <b>Transfer of ${amount}</b>\n👉 <b>Who is paying? (Sender)</b>`;
-        ctx.callbackQuery ? await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }) : await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+        if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+        else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/payfrom_(pay_.+)_(\d+)/, async (ctx) => {
-        const draft = await getDraft(env.DB, ctx.match[1]);
+      bot.callbackQuery(/^payfrom_(pay_.+)_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[1];
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft) return;
         draft.fromId = Number(ctx.match[2]);
-        await saveDraft(env.DB, ctx.match[1], draft);
+        await saveDraft(env.DB, draftId, draft);
         const members = await getProjectMembers(env.DB, draft.projectId);
+        const receivers = members.filter(m => m.user_id !== draft.fromId);
+        if (receivers.length === 0) {
+          await ctx.editMessageText(`❌ <b>No other members to transfer to!</b>`, { parse_mode: "HTML" });
+          return;
+        }
         const kb = new InlineKeyboard();
-        members.filter(m => m.user_id !== draft.fromId).forEach(m => kb.text(m.name, `payto_${ctx.match[1]}_${m.user_id}`).row());
+        for (let i = 0; i < receivers.length; i++) {
+          kb.text(receivers[i].name, `payto_${draftId}_${receivers[i].user_id}`);
+          if (i % 2 === 1) kb.row();
+        }
+        if (receivers.length % 2 !== 0) kb.row();
         await ctx.editMessageText(`💸 <b>Transfer of ${draft.amount}</b>\n👉 <b>Who is receiving?</b>`, { parse_mode: "HTML", reply_markup: kb });
       });
 
-      bot.callbackQuery(/payto_(pay_.+)_(\d+)/, async (ctx) => {
-        const draft = await getDraft(env.DB, ctx.match[1]);
+      bot.callbackQuery(/^payto_(pay_.+)_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[1];
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft) return;
         const t = await env.DB.prepare("INSERT INTO settlements (project_id, from_user_id, to_user_id, amount) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.fromId, Number(ctx.match[2]), draft.amount).first() as any;
-        await deleteDraft(env.DB, ctx.match[1]);
+        await deleteDraft(env.DB, draftId);
         
         const kb = new InlineKeyboard().text("↩️ Undo", `delpay_${t.id}_${draft.projectId}`);
         await ctx.editMessageText(`✅ <b>Payment Recorded!</b>\nAmount: ${draft.amount}`, { parse_mode: "HTML", reply_markup: kb });
+
+        // Delete original command and prompts at the end of the payment flow
+        if (ctx.chat && draft.msgIds && draft.msgIds.length > 0) {
+          await deleteMessages(ctx, ctx.chat.id, draft.msgIds);
+        }
       });
 
       // --- DELETE / UNDO HANDLERS ---
-      bot.callbackQuery(/delexp_(\d+)_(\d+)/, async (ctx) => {
+      bot.callbackQuery(/^delexp_(\d+)_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery("Deleted!").catch(() => {});
         const expId = Number(ctx.match[1]);
         await env.DB.prepare("DELETE FROM expense_splits WHERE expense_id = ?").bind(expId).run();
         await env.DB.prepare("DELETE FROM expenses WHERE id = ?").bind(expId).run();
         await ctx.editMessageText("🗑️ <i>Expense deleted successfully.</i>", { parse_mode: "HTML" });
       });
 
-      bot.callbackQuery(/delpay_(\d+)_(\d+)/, async (ctx) => {
+      bot.callbackQuery(/^delpay_(\d+)_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery("Deleted!").catch(() => {});
         const payId = Number(ctx.match[1]);
         await env.DB.prepare("DELETE FROM settlements WHERE id = ?").bind(payId).run();
         await ctx.editMessageText("🗑️ <i>Payment deleted successfully.</i>", { parse_mode: "HTML" });
       });
 
       // --- CALLBACKS FOR BALANCES, SETTLE, DELETE, REPORT & CLOSE ---
-      
-      bot.callbackQuery(/selproj_bal_(\d+)_/, async (ctx) => await showBalancesMenu(ctx, env.DB, Number(ctx.match[1])));
+      bot.callbackQuery(/^selproj_bal_(\d+)(?:_.*)?$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        await showBalancesMenu(ctx, env.DB, Number(ctx.match[1]));
+      });
+
       async function showBalancesMenu(ctx: Context, db: D1Database, projId: number) {
         const members = await getProjectMembers(db, projId);
         const proj = await getProjectById(db, projId);
+        if (!proj) return;
+        if (members.length === 0) {
+          const text = `📊 <b>Balances for ${proj.name}:</b>\nNo members in this project yet.`;
+          if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML" });
+          else await ctx.reply(text, { parse_mode: "HTML" });
+          return;
+        }
         const kb = new InlineKeyboard();
-        members.forEach(m => kb.text(`👤 ${m.name}`, `baluser_${projId}_${m.user_id}`).row());
+        for (let i = 0; i < members.length; i++) {
+          kb.text(`👤 ${members[i].name}`, `baluser_${projId}_${members[i].user_id}`);
+          if (i % 2 === 1) kb.row();
+        }
+        if (members.length % 2 !== 0) kb.row();
+
         const text = `📊 <b>Balances for ${proj.name}:</b>\nTap a member below to see their detailed breakdown:`;
-        ctx.callbackQuery ? await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }) : await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+        if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+        else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/baluser_(\d+)_(\d+)/, async (ctx) => {
-        const projId = Number(ctx.match[1]); const userId = Number(ctx.match[2]);
+      bot.callbackQuery(/^baluser_(\d+)_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const projId = Number(ctx.match[1]);
+        const userId = Number(ctx.match[2]);
         const proj = await getProjectById(env.DB, projId);
+        if (!proj) return;
         const { netBalances, names, totalPaid, totalShare } = await calculateBalances(env.DB, projId);
-        const myBal = netBalances[userId] || 0; const myName = names[userId];
+        const myBal = netBalances[userId] || 0;
+        const myName = names[userId] || "Member";
         
         let msg = `👤 <b>Balance Breakdown for ${myName}</b> (${proj.name})\n\n`;
         const transactions = getSettlementTransactions(netBalances);
@@ -558,52 +706,69 @@ export default {
 
         if (myDebts.length > 0 || myCredits.length > 0) {
           msg += `🧾 <b>Actionable Debts:</b>\n`;
-          myDebts.forEach(d => msg += `🔴 Owes <b>${d.amount.toFixed(2)}</b> to ${names[d.to]}\n`);
-          myCredits.forEach(c => msg += `🟢 Gets <b>${c.amount.toFixed(2)}</b> from ${names[c.from]}\n`);
+          myDebts.forEach(d => msg += `🔴 Owes <b>${d.amount.toFixed(2)}</b> to ${names[d.to] || 'Unknown'}\n`);
+          myCredits.forEach(c => msg += `🟢 Gets <b>${c.amount.toFixed(2)}</b> from ${names[c.from] || 'Unknown'}\n`);
           msg += `\n`;
-        } else { msg += `✅ <b>No pending debts!</b>\n\n`; }
+        } else {
+          msg += `✅ <b>No pending debts!</b>\n\n`;
+        }
 
-        msg += `💰 <b>Total Paid Out:</b> ${totalPaid[userId]?.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''}\n`;
-        msg += `🍽️ <b>Total Consumed:</b> ${totalShare[userId]?.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''}\n`;
+        msg += `💰 <b>Total Paid Out:</b> ${totalPaid[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + proj.currency : ''}\n`;
+        msg += `🍽️ <b>Total Consumed:</b> ${totalShare[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + proj.currency : ''}\n`;
         msg += `------------------------------------\n`;
         if (myBal > 0.01) msg += `🟢 <b>Overall Total:</b> Gets back <b>+${myBal.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''}</b>`;
         else if (myBal < -0.01) msg += `🔴 <b>Overall Total:</b> Owes <b>${myBal.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''}</b>`;
         else msg += `⚪ <b>Overall Total:</b> Settled ($0.00)`;
 
-        const kb = new InlineKeyboard().text("« Back to Members", `selproj_bal_${projId}_`);
+        const kb = new InlineKeyboard().text("« Back to Members", `selproj_bal_${projId}`);
         await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
-        await ctx.answerCallbackQuery();
       });
 
-      bot.callbackQuery(/selproj_settle_(\d+)_/, async (ctx) => await showSettlement(ctx, env.DB, Number(ctx.match[1])));
+      bot.callbackQuery(/^selproj_settle_(\d+)(?:_.*)?$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        await showSettlement(ctx, env.DB, Number(ctx.match[1]));
+      });
+
       async function showSettlement(ctx: Context, db: D1Database, projId: number) {
         const proj = await getProjectById(db, projId);
+        if (!proj) return;
         const { netBalances, names } = await calculateBalances(db, projId);
         const steps = solveSettlement(netBalances, names, proj.currency);
         let report = `⚖️ <b>Optimal Settlement Plan for ${proj.name}:</b>\n\n`;
         if (steps.length === 0) report += "✅ <b>All settled up!</b> Everyone is at 0 balance.";
         else report += steps.join("\n") + "\n\n<i>Tip: Use /pay to record transfers.</i>";
-        ctx.callbackQuery ? await ctx.editMessageText(report, { parse_mode: "HTML" }) : await ctx.reply(report, { parse_mode: "HTML" });
+        if (ctx.callbackQuery) await ctx.editMessageText(report, { parse_mode: "HTML" });
+        else await ctx.reply(report, { parse_mode: "HTML" });
       }
 
-      bot.callbackQuery(/selproj_delete_(\d+)/, async (ctx) => await showLedger(ctx, env.DB, Number(ctx.match[1])));
+      bot.callbackQuery(/^selproj_delete_(\d+)(?:_.*)?$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        await showLedger(ctx, env.DB, Number(ctx.match[1]));
+      });
+
       async function showLedger(ctx: Context, db: D1Database, projId: number) {
+        const proj = await getProjectById(db, projId);
+        if (!proj) return;
         const { results: exps } = await db.prepare("SELECT * FROM expenses WHERE project_id = ? ORDER BY id DESC LIMIT 5").bind(projId).all();
         const { results: pays } = await db.prepare("SELECT * FROM settlements WHERE project_id = ? ORDER BY id DESC LIMIT 5").bind(projId).all();
-        const kb = new InlineKeyboard(); let hasData = false;
+        const kb = new InlineKeyboard();
+        let hasData = false;
         (exps as any[]).forEach(e => { kb.text(`❌ Exp: ${e.description} (${e.amount})`, `delexp_${e.id}_${projId}`).row(); hasData = true; });
         (pays as any[]).forEach(p => { kb.text(`❌ Pay: Transfer (${p.amount})`, `delpay_${p.id}_${projId}`).row(); hasData = true; });
         const text = hasData ? "📖 <b>Recent Ledger:</b>\nTap the ❌ next to an item to delete it permanently." : "📖 Ledger is empty.";
-        ctx.callbackQuery ? await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }) : await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+        const opts = hasData ? { parse_mode: "HTML" as const, reply_markup: kb } : { parse_mode: "HTML" as const };
+        if (ctx.callbackQuery) await ctx.editMessageText(text, opts);
+        else await ctx.reply(text, opts);
       }
 
-      bot.callbackQuery(/selproj_report_(\d+)_/, async (ctx) => {
+      bot.callbackQuery(/^selproj_report_(\d+)(?:_.*)?$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
         await showReport(ctx, env.DB, Number(ctx.match[1]));
-        await ctx.answerCallbackQuery();
       });
 
       async function showReport(ctx: Context, db: D1Database, projId: number) {
         const proj = await getProjectById(db, projId);
+        if (!proj) return;
         const { netBalances, names, totalPaid, members } = await calculateBalances(db, projId);
 
         const expSumRow = await db.prepare("SELECT SUM(amount) as total, COUNT(id) as count FROM expenses WHERE project_id = ?").bind(projId).first() as any;
@@ -620,13 +785,16 @@ export default {
           msg += `• <b>${m.name}:</b> Paid ${paid.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''} | Net: ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}\n`;
         }
 
-        ctx.callbackQuery ? await ctx.editMessageText(msg, { parse_mode: "HTML" }) : await ctx.reply(msg, { parse_mode: "HTML" });
+        if (ctx.callbackQuery) await ctx.editMessageText(msg, { parse_mode: "HTML" });
+        else await ctx.reply(msg, { parse_mode: "HTML" });
       }
 
-      bot.callbackQuery(/closeproj_(\d+)/, async (ctx) => {
+      bot.callbackQuery(/^closeproj_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
         const projId = Number(ctx.match[1]);
-        const proj = await getProjectById(db, projId);
-        const { netBalances } = await calculateBalances(db, projId);
+        const proj = await getProjectById(env.DB, projId);
+        if (!proj) return;
+        const { netBalances } = await calculateBalances(env.DB, projId);
 
         const unsettled = Object.values(netBalances).some(b => Math.abs(b) > 0.01);
         if (unsettled) {
@@ -634,12 +802,11 @@ export default {
             `❌ <b>Cannot close ${proj.name}!</b>\n\nThere are still unsettled debts. Run /settle to see who needs to pay whom, and log payments with /pay.`,
             { parse_mode: "HTML" }
           );
-          return ctx.answerCallbackQuery();
+          return;
         }
 
         await env.DB.prepare("UPDATE projects SET status = 'ended' WHERE id = ?").bind(projId).run();
         await ctx.editMessageText(`🔒 <b>Project ${proj.name} is now officially closed and archived.</b>`, { parse_mode: "HTML" });
-        await ctx.answerCallbackQuery();
       });
 
       return webhookCallback(bot, "cloudflare-mod")(request);
