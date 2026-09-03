@@ -140,6 +140,42 @@ function safeEval(expr: string): number {
   return isNaN(result) ? NaN : result;
 }
 
+function parseMathInput(raw: string): { mathExpr: string; desc: string } {
+  const persian = [/۰/g, /۱/g, /۲/g, /۳/g, /۴/g, /۵/g, /۶/g, /۷/g, /۸/g, /۹/g];
+  const arabic  = [/٠/g, /١/g, /٢/g, /٣/g, /٤/g, /٥/g, /٦/g, /٧/g, /٨/g, /٩/g];
+  let text = (raw || "").trim();
+  for (let i = 0; i < 10; i++) {
+    text = text.replace(persian[i], i.toString()).replace(arabic[i], i.toString());
+  }
+
+  const tokens = text.split(/\s+/).filter(Boolean);
+  const mathTokens: string[] = [];
+  const descTokens: string[] = [];
+  let foundDesc = false;
+
+  for (const token of tokens) {
+    if (!foundDesc) {
+      if (/^[0-9+\-*/().]+$/.test(token)) {
+        mathTokens.push(token);
+      } else {
+        foundDesc = true;
+        descTokens.push(token);
+      }
+    } else {
+      descTokens.push(token);
+    }
+  }
+
+  // If the last math token is an operator and we have description tokens, move it to description
+  while (mathTokens.length > 1 && /^[+\-*/]+$/.test(mathTokens[mathTokens.length - 1]) && descTokens.length > 0) {
+    descTokens.unshift(mathTokens.pop()!);
+  }
+
+  const mathExpr = mathTokens.join("");
+  const desc = descTokens.join(" ");
+  return { mathExpr, desc };
+}
+
 async function calculateBalances(db: D1Database, projectId: number) {
   const members = await getProjectMembers(db, projectId);
   const netBalances: Record<number, number> = {};
@@ -246,11 +282,14 @@ export default {
 
       const processAdd = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
         if (!ctx.chat) return;
-        if (!args || args.length === 0) return ctx.reply("❌ Missing expense amount.");
-        const amount = safeEval(args[0]); 
-        if (isNaN(amount) || amount <= 0) return ctx.reply("❌ Invalid amount provided.");
+        const raw = (args || []).join(" ");
+        const { mathExpr, desc: parsedDesc } = parseMathInput(raw);
+        if (!mathExpr) return ctx.reply("❌ Missing expense amount.");
+        const evaluated = safeEval(mathExpr);
+        if (isNaN(evaluated) || evaluated <= 0) return ctx.reply(`❌ Invalid math or amount: '<code>${mathExpr}</code>'`, { parse_mode: "HTML" });
+        const amount = Math.round(evaluated * 100) / 100;
         
-        let desc = args.slice(1).join(" ");
+        let desc = parsedDesc;
         if (!desc) {
           desc = new Date().toISOString().replace('T', ' ').substring(0, 16); 
         }
@@ -263,9 +302,12 @@ export default {
 
       const processPay = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
         if (!ctx.chat) return;
-        if (!args || args.length === 0) return ctx.reply("❌ Missing payment amount.");
-        const amount = safeEval(args[0]);
-        if (isNaN(amount) || amount <= 0) return ctx.reply("❌ Invalid payment amount.");
+        const raw = (args || []).join(" ");
+        const { mathExpr } = parseMathInput(raw);
+        if (!mathExpr) return ctx.reply("❌ Missing payment amount.");
+        const evaluated = safeEval(mathExpr);
+        if (isNaN(evaluated) || evaluated <= 0) return ctx.reply(`❌ Invalid math or amount: '<code>${mathExpr}</code>'`, { parse_mode: "HTML" });
+        const amount = Math.round(evaluated * 100) / 100;
         const draftId = `pay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
         const { projectId } = await routeProjectCommand(ctx, env.DB, "pay", draftId);
         await saveDraft(env.DB, draftId, { amount, projectId, fromId: null, toId: null, msgIds: initialMsgIds });
@@ -323,7 +365,7 @@ export default {
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
           return ctx.reply(
-            `Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code>):\n\n<span class="tg-spoiler">[Action: add_prompt_${cmdMsgId}]</span>`,
+            `Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code> or <code>2000+3000 Taxi</code>):\n\n<span class="tg-spoiler">[Action: add_prompt_${cmdMsgId}]</span>`,
             { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
           );
         }
@@ -337,7 +379,7 @@ export default {
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
           return ctx.reply(
-            `Reply to this message with the amount you are transferring (e.g. <code>50000</code>):\n\n<span class="tg-spoiler">[Action: pay_prompt_${cmdMsgId}]</span>`,
+            `Reply to this message with the amount you are transferring (e.g. <code>50000</code> or <code>10000/2</code>):\n\n<span class="tg-spoiler">[Action: pay_prompt_${cmdMsgId}]</span>`,
             { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
           );
         }
