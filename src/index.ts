@@ -192,15 +192,23 @@ function solveSettlement(netBalances: Record<number, number>, names: Record<numb
   return txs.map(t => `💸 <b>${names[t.from] || 'Unknown'}</b> ➔ <b>${names[t.to] || 'Unknown'}</b>: ${t.amount.toFixed(2)}${currency ? ' ' + currency : ''}`);
 }
 
-async function routeProjectCommand(ctx: Context, db: D1Database, action: string, payload: string = ""): Promise<{ projectId: number | null }> {
+async function routeProjectCommand(ctx: Context, db: D1Database, action: string, payload: string = "", cmdMsgId: number = 0): Promise<{ projectId: number | null }> {
   if (!ctx.chat) return { projectId: null };
   const active = await getActiveProjects(db, ctx.chat.id);
   if (active.length === 0) { await ctx.reply("❌ No active projects."); return { projectId: null }; }
   if (active.length === 1) return { projectId: active[0].id };
   const kb = new InlineKeyboard();
   for (const p of active) {
-    const data = payload ? `selproj_${action}_${p.id}_${payload}` : `selproj_${action}_${p.id}`;
+    const fullPayload = payload || (cmdMsgId ? `${cmdMsgId}` : "");
+    const data = fullPayload ? `selproj_${action}_${p.id}_${fullPayload}` : `selproj_${action}_${p.id}`;
     kb.text(`${p.name}${p.currency ? ' (' + p.currency + ')' : ''}`, data).row();
+  }
+  if (payload.startsWith("exp_") || payload.startsWith("pay_")) {
+    kb.text("❌ Cancel", `canceldraft_${payload}`).row();
+  } else if (cmdMsgId) {
+    kb.text("❌ Close", `closeflow_${cmdMsgId}`).row();
+  } else {
+    kb.text("❌ Close", "closemsg").row();
   }
   await ctx.reply("📁 Choose a project:", { reply_markup: kb });
   return { projectId: null };
@@ -314,26 +322,30 @@ export default {
 
       bot.command("balances", async (ctx) => {
         if (!ctx.chat) return;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "bal");
-        if (projectId) await showBalancesMenu(ctx, env.DB, projectId);
+        const cmdMsgId = ctx.message?.message_id || 0;
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "bal", "", cmdMsgId);
+        if (projectId) await showBalancesMenu(ctx, env.DB, projectId, cmdMsgId);
       });
 
       bot.command("settle", async (ctx) => {
         if (!ctx.chat) return;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "settle");
-        if (projectId) await showSettlement(ctx, env.DB, projectId);
+        const cmdMsgId = ctx.message?.message_id || 0;
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "settle", "", cmdMsgId);
+        if (projectId) await showSettlement(ctx, env.DB, projectId, cmdMsgId);
       });
 
       bot.command("delete", async (ctx) => {
         if (!ctx.chat) return;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "delete");
-        if (projectId) await showLedger(ctx, env.DB, projectId);
+        const cmdMsgId = ctx.message?.message_id || 0;
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "delete", "", cmdMsgId);
+        if (projectId) await showLedger(ctx, env.DB, projectId, cmdMsgId);
       });
 
       bot.command("report", async (ctx) => {
         if (!ctx.chat) return;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "report");
-        if (projectId) await showReport(ctx, env.DB, projectId);
+        const cmdMsgId = ctx.message?.message_id || 0;
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "report", "", cmdMsgId);
+        if (projectId) await showReport(ctx, env.DB, projectId, cmdMsgId);
       });
 
       bot.command("projects", async (ctx) => {
@@ -341,11 +353,14 @@ export default {
         const projects = await getAllProjects(env.DB, ctx.chat.id);
         if (projects.length === 0) return ctx.reply("No projects found for this group.");
 
+        const cmdMsgId = ctx.message?.message_id || 0;
         const kb = new InlineKeyboard();
         for (const p of projects) {
           const statusIcon = p.status === "active" ? "🟢" : "🔒";
-          kb.text(`${statusIcon} ${p.name}${p.currency ? ' (' + p.currency + ')' : ''}`, `selproj_report_${p.id}`).row();
+          const data = cmdMsgId ? `selproj_report_${p.id}_${cmdMsgId}` : `selproj_report_${p.id}`;
+          kb.text(`${statusIcon} ${p.name}${p.currency ? ' (' + p.currency + ')' : ''}`, data).row();
         }
+        kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         await ctx.reply("📜 <b>All Projects:</b>\nSelect any project to view its full report:", { parse_mode: "HTML", reply_markup: kb });
       });
 
@@ -354,10 +369,12 @@ export default {
         const active = await getActiveProjects(env.DB, ctx.chat.id);
         if (active.length === 0) return ctx.reply("No active projects to close.");
 
+        const cmdMsgId = ctx.message?.message_id || 0;
         const kb = new InlineKeyboard();
         for (const p of active) {
           kb.text(`Close: ${p.name}`, `closeproj_${p.id}`).row();
         }
+        kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         await ctx.reply("⚠️ <b>Select a project to close:</b>\n(Note: All balances must be settled first)", { parse_mode: "HTML", reply_markup: kb });
       });
 
@@ -424,7 +441,9 @@ export default {
           for (const s of userShares) await env.DB.prepare("INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)").bind(exp.id, s.userId, s.amount).run();
           
           await deleteDraft(env.DB, draftId);
-          const kb = new InlineKeyboard().text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`);
+          const kb = new InlineKeyboard()
+            .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
+            .text("❌ Close", "closemsg");
           let reportMsg = `✅ <b>Unequal Expense Saved!</b>\n🧾 <b>${draft.desc}</b> (${draft.amount})\n\n`;
           userShares.forEach(s => reportMsg += `• ${s.name}: ${s.amount}\n`);
           await ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
@@ -458,8 +477,9 @@ export default {
 
       bot.callbackQuery(/^join_done_(\d+)$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
         try {
-          await ctx.editMessageText("✅ Group locked. You can now log expenses with /add.");
+          await ctx.editMessageText("✅ Group locked. You can now log expenses with /add.", { reply_markup: kb });
         } catch (_) {}
       });
 
@@ -489,8 +509,9 @@ export default {
         const members = await getProjectMembers(db, projId);
         if (members.length === 0) {
           const text = `❌ <b>No members in this project yet!</b>\nUse /new or tap Join Project first.`;
-          if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML" });
-          else await ctx.reply(text, { parse_mode: "HTML" });
+          const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+          if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+          else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
           return;
         }
         const kb = new InlineKeyboard();
@@ -499,6 +520,7 @@ export default {
           if (i % 2 === 1) kb.row();
         }
         if (members.length % 2 !== 0) kb.row();
+        kb.text("❌ Cancel", `canceldraft_${draftId}`);
 
         const text = `🧾 <b>${desc}</b> (${amount})\n👉 <b>Who paid?</b>`;
         if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
@@ -515,7 +537,8 @@ export default {
         }
         if (members.length % 2 !== 0) kb.row();
 
-        kb.text("⚡ Unequal Split", `expunequal_${draftId}`).text("💾 Confirm Equal", `expconfirm_${draftId}`);
+        kb.text("⚡ Unequal Split", `expunequal_${draftId}`).text("💾 Confirm Equal", `expconfirm_${draftId}`).row();
+        kb.text("❌ Cancel", `canceldraft_${draftId}`);
         await ctx.editMessageText(`🧾 <b>${draft.desc}</b> (${draft.amount})\n<i>Toggle who shares this equally, or choose Unequal:</i>`, { parse_mode: "HTML", reply_markup: kb });
       }
 
@@ -540,7 +563,9 @@ export default {
         for (const uid of draft.splitWith) await env.DB.prepare("INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)").bind(exp.id, uid, share).run();
         
         await deleteDraft(env.DB, draftId);
-        const kb = new InlineKeyboard().text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`);
+        const kb = new InlineKeyboard()
+          .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
+          .text("❌ Close", "closemsg");
         await ctx.editMessageText(`✅ <b>Expense Saved!</b>\n🧾 <b>${draft.desc}</b> (${draft.amount})\n\n<i>Split equally between ${draft.splitWith.length} people.</i>`, { parse_mode: "HTML", reply_markup: kb });
 
         // Delete previous messages of this flow after showing the last message
@@ -590,8 +615,9 @@ export default {
         const members = await getProjectMembers(db, projId);
         if (members.length === 0) {
           const text = `❌ <b>No members in this project yet!</b>`;
-          if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML" });
-          else await ctx.reply(text, { parse_mode: "HTML" });
+          const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+          if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+          else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
           return;
         }
         const kb = new InlineKeyboard();
@@ -600,6 +626,7 @@ export default {
           if (i % 2 === 1) kb.row();
         }
         if (members.length % 2 !== 0) kb.row();
+        kb.text("❌ Cancel", `canceldraft_${draftId}`);
 
         const text = `💸 <b>Transfer of ${amount}</b>\n👉 <b>Who is paying? (Sender)</b>`;
         if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
@@ -616,7 +643,8 @@ export default {
         const members = await getProjectMembers(env.DB, draft.projectId);
         const receivers = members.filter(m => m.user_id !== draft.fromId);
         if (receivers.length === 0) {
-          await ctx.editMessageText(`❌ <b>No other members to transfer to!</b>`, { parse_mode: "HTML" });
+          const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+          await ctx.editMessageText(`❌ <b>No other members to transfer to!</b>`, { parse_mode: "HTML", reply_markup: kb });
           return;
         }
         const kb = new InlineKeyboard();
@@ -625,6 +653,7 @@ export default {
           if (i % 2 === 1) kb.row();
         }
         if (receivers.length % 2 !== 0) kb.row();
+        kb.text("❌ Cancel", `canceldraft_${draftId}`);
         await ctx.editMessageText(`💸 <b>Transfer of ${draft.amount}</b>\n👉 <b>Who is receiving?</b>`, { parse_mode: "HTML", reply_markup: kb });
       });
 
@@ -636,7 +665,9 @@ export default {
         const t = await env.DB.prepare("INSERT INTO settlements (project_id, from_user_id, to_user_id, amount) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.fromId, Number(ctx.match[2]), draft.amount).first() as any;
         await deleteDraft(env.DB, draftId);
         
-        const kb = new InlineKeyboard().text("↩️ Undo", `delpay_${t.id}_${draft.projectId}`);
+        const kb = new InlineKeyboard()
+          .text("↩️ Undo", `delpay_${t.id}_${draft.projectId}`)
+          .text("❌ Close", "closemsg");
         await ctx.editMessageText(`✅ <b>Payment Recorded!</b>\nAmount: ${draft.amount}`, { parse_mode: "HTML", reply_markup: kb });
 
         // Delete original command and prompts at the end of the payment flow
@@ -651,48 +682,55 @@ export default {
         const expId = Number(ctx.match[1]);
         await env.DB.prepare("DELETE FROM expense_splits WHERE expense_id = ?").bind(expId).run();
         await env.DB.prepare("DELETE FROM expenses WHERE id = ?").bind(expId).run();
-        await ctx.editMessageText("🗑️ <i>Expense deleted successfully.</i>", { parse_mode: "HTML" });
+        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
+        await ctx.editMessageText("🗑️ <i>Expense deleted successfully.</i>", { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^delpay_(\d+)_(\d+)$/, async (ctx) => {
         await ctx.answerCallbackQuery("Deleted!").catch(() => {});
         const payId = Number(ctx.match[1]);
         await env.DB.prepare("DELETE FROM settlements WHERE id = ?").bind(payId).run();
-        await ctx.editMessageText("🗑️ <i>Payment deleted successfully.</i>", { parse_mode: "HTML" });
+        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
+        await ctx.editMessageText("🗑️ <i>Payment deleted successfully.</i>", { parse_mode: "HTML", reply_markup: kb });
       });
 
       // --- CALLBACKS FOR BALANCES, SETTLE, DELETE, REPORT & CLOSE ---
-      bot.callbackQuery(/^selproj_bal_(\d+)(?:_.*)?$/, async (ctx) => {
+      bot.callbackQuery(/^selproj_bal_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
-        await showBalancesMenu(ctx, env.DB, Number(ctx.match[1]));
+        const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
+        await showBalancesMenu(ctx, env.DB, Number(ctx.match[1]), cmdMsgId);
       });
 
-      async function showBalancesMenu(ctx: Context, db: D1Database, projId: number) {
+      async function showBalancesMenu(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0) {
         const members = await getProjectMembers(db, projId);
         const proj = await getProjectById(db, projId);
         if (!proj) return;
         if (members.length === 0) {
           const text = `📊 <b>Balances for ${proj.name}:</b>\nNo members in this project yet.`;
-          if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML" });
-          else await ctx.reply(text, { parse_mode: "HTML" });
+          const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+          else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
           return;
         }
         const kb = new InlineKeyboard();
         for (let i = 0; i < members.length; i++) {
-          kb.text(`👤 ${members[i].name}`, `baluser_${projId}_${members[i].user_id}`);
+          const data = cmdMsgId ? `baluser_${projId}_${members[i].user_id}_${cmdMsgId}` : `baluser_${projId}_${members[i].user_id}`;
+          kb.text(`👤 ${members[i].name}`, data);
           if (i % 2 === 1) kb.row();
         }
         if (members.length % 2 !== 0) kb.row();
+        kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
         const text = `📊 <b>Balances for ${proj.name}:</b>\nTap a member below to see their detailed breakdown:`;
         if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
         else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/^baluser_(\d+)_(\d+)$/, async (ctx) => {
+      bot.callbackQuery(/^baluser_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         const projId = Number(ctx.match[1]);
         const userId = Number(ctx.match[2]);
+        const cmdMsgId = ctx.match[3] ? Number(ctx.match[3]) : 0;
         const proj = await getProjectById(env.DB, projId);
         if (!proj) return;
         const { netBalances, names, totalPaid, totalShare } = await calculateBalances(env.DB, projId);
@@ -720,16 +758,20 @@ export default {
         else if (myBal < -0.01) msg += `🔴 <b>Overall Total:</b> Owes <b>${myBal.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''}</b>`;
         else msg += `⚪ <b>Overall Total:</b> Settled ($0.00)`;
 
-        const kb = new InlineKeyboard().text("« Back to Members", `selproj_bal_${projId}`);
+        const backData = cmdMsgId ? `selproj_bal_${projId}_${cmdMsgId}` : `selproj_bal_${projId}`;
+        const kb = new InlineKeyboard()
+          .text("« Back to Members", backData)
+          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
       });
 
-      bot.callbackQuery(/^selproj_settle_(\d+)(?:_.*)?$/, async (ctx) => {
+      bot.callbackQuery(/^selproj_settle_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
-        await showSettlement(ctx, env.DB, Number(ctx.match[1]));
+        const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
+        await showSettlement(ctx, env.DB, Number(ctx.match[1]), cmdMsgId);
       });
 
-      async function showSettlement(ctx: Context, db: D1Database, projId: number) {
+      async function showSettlement(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0) {
         const proj = await getProjectById(db, projId);
         if (!proj) return;
         const { netBalances, names } = await calculateBalances(db, projId);
@@ -737,36 +779,38 @@ export default {
         let report = `⚖️ <b>Optimal Settlement Plan for ${proj.name}:</b>\n\n`;
         if (steps.length === 0) report += "✅ <b>All settled up!</b> Everyone is at 0 balance.";
         else report += steps.join("\n") + "\n\n<i>Tip: Use /pay to record transfers.</i>";
-        if (ctx.callbackQuery) await ctx.editMessageText(report, { parse_mode: "HTML" });
-        else await ctx.reply(report, { parse_mode: "HTML" });
+        const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        if (ctx.callbackQuery) await ctx.editMessageText(report, { parse_mode: "HTML", reply_markup: kb });
+        else await ctx.reply(report, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/^selproj_delete_(\d+)(?:_.*)?$/, async (ctx) => {
+      bot.callbackQuery(/^selproj_delete_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
-        await showLedger(ctx, env.DB, Number(ctx.match[1]));
+        const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
+        await showLedger(ctx, env.DB, Number(ctx.match[1]), cmdMsgId);
       });
 
-      async function showLedger(ctx: Context, db: D1Database, projId: number) {
+      async function showLedger(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0) {
         const proj = await getProjectById(db, projId);
         if (!proj) return;
         const { results: exps } = await db.prepare("SELECT * FROM expenses WHERE project_id = ? ORDER BY id DESC LIMIT 5").bind(projId).all();
         const { results: pays } = await db.prepare("SELECT * FROM settlements WHERE project_id = ? ORDER BY id DESC LIMIT 5").bind(projId).all();
         const kb = new InlineKeyboard();
-        let hasData = false;
-        (exps as any[]).forEach(e => { kb.text(`❌ Exp: ${e.description} (${e.amount})`, `delexp_${e.id}_${projId}`).row(); hasData = true; });
-        (pays as any[]).forEach(p => { kb.text(`❌ Pay: Transfer (${p.amount})`, `delpay_${p.id}_${projId}`).row(); hasData = true; });
-        const text = hasData ? "📖 <b>Recent Ledger:</b>\nTap the ❌ next to an item to delete it permanently." : "📖 Ledger is empty.";
-        const opts = hasData ? { parse_mode: "HTML" as const, reply_markup: kb } : { parse_mode: "HTML" as const };
-        if (ctx.callbackQuery) await ctx.editMessageText(text, opts);
-        else await ctx.reply(text, opts);
+        (exps as any[]).forEach(e => { kb.text(`❌ Exp: ${e.description} (${e.amount})`, `delexp_${e.id}_${projId}`).row(); });
+        (pays as any[]).forEach(p => { kb.text(`❌ Pay: Transfer (${p.amount})`, `delpay_${p.id}_${projId}`).row(); });
+        const text = (exps.length > 0 || pays.length > 0) ? "📖 <b>Recent Ledger:</b>\nTap the ❌ next to an item to delete it permanently." : "📖 Ledger is empty.";
+        kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+        else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/^selproj_report_(\d+)(?:_.*)?$/, async (ctx) => {
+      bot.callbackQuery(/^selproj_report_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
-        await showReport(ctx, env.DB, Number(ctx.match[1]));
+        const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
+        await showReport(ctx, env.DB, Number(ctx.match[1]), cmdMsgId);
       });
 
-      async function showReport(ctx: Context, db: D1Database, projId: number) {
+      async function showReport(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0) {
         const proj = await getProjectById(db, projId);
         if (!proj) return;
         const { netBalances, names, totalPaid, members } = await calculateBalances(db, projId);
@@ -785,8 +829,9 @@ export default {
           msg += `• <b>${m.name}:</b> Paid ${paid.toFixed(2)}${proj.currency ? ' ' + proj.currency : ''} | Net: ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}\n`;
         }
 
-        if (ctx.callbackQuery) await ctx.editMessageText(msg, { parse_mode: "HTML" });
-        else await ctx.reply(msg, { parse_mode: "HTML" });
+        const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        if (ctx.callbackQuery) await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
+        else await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
       }
 
       bot.callbackQuery(/^closeproj_(\d+)$/, async (ctx) => {
@@ -798,15 +843,52 @@ export default {
 
         const unsettled = Object.values(netBalances).some(b => Math.abs(b) > 0.01);
         if (unsettled) {
+          const kb = new InlineKeyboard().text("❌ Close", "closemsg");
           await ctx.editMessageText(
             `❌ <b>Cannot close ${proj.name}!</b>\n\nThere are still unsettled debts. Run /settle to see who needs to pay whom, and log payments with /pay.`,
-            { parse_mode: "HTML" }
+            { parse_mode: "HTML", reply_markup: kb }
           );
           return;
         }
 
         await env.DB.prepare("UPDATE projects SET status = 'ended' WHERE id = ?").bind(projId).run();
-        await ctx.editMessageText(`🔒 <b>Project ${proj.name} is now officially closed and archived.</b>`, { parse_mode: "HTML" });
+        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
+        await ctx.editMessageText(`🔒 <b>Project ${proj.name} is now officially closed and archived.</b>`, { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      // --- DISMISSAL / CLEANUP HANDLERS ---
+      bot.callbackQuery(/^canceldraft_(.+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery("Cancelled").catch(() => {});
+        const draftId = ctx.match[1];
+        const draft = await getDraft(env.DB, draftId);
+        const toDelete: number[] = [];
+        if (ctx.callbackQuery.message?.message_id) {
+          toDelete.push(ctx.callbackQuery.message.message_id);
+        }
+        if (draft?.msgIds) {
+          toDelete.push(...draft.msgIds);
+        }
+        await deleteDraft(env.DB, draftId);
+        if (ctx.chat && toDelete.length > 0) {
+          await deleteMessages(ctx, ctx.chat.id, toDelete);
+        }
+      });
+
+      bot.callbackQuery(/^closeflow_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const cmdMsgId = Number(ctx.match[1]);
+        const currentMsgId = ctx.callbackQuery.message?.message_id;
+        const toDelete = [currentMsgId, cmdMsgId].filter((id): id is number => typeof id === "number" && id > 0);
+        if (ctx.chat && toDelete.length > 0) {
+          await deleteMessages(ctx, ctx.chat.id, toDelete);
+        }
+      });
+
+      bot.callbackQuery(/^closemsg$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        if (ctx.chat && ctx.callbackQuery.message?.message_id) {
+          await deleteMessages(ctx, ctx.chat.id, [ctx.callbackQuery.message.message_id]);
+        }
       });
 
       return webhookCallback(bot, "cloudflare-mod")(request);
