@@ -78,11 +78,16 @@ async function deleteDraft(db: D1Database, key: string) {
 
 async function deleteMessages(ctx: Context, chatId: number, messageIds: (number | undefined | null)[]) {
   const uniqueIds = Array.from(new Set(messageIds.filter((id): id is number => typeof id === 'number' && id > 0)));
-  await Promise.all(uniqueIds.map(async (msgId) => {
-    try {
-      await ctx.api.deleteMessage(chatId, msgId);
-    } catch (_) {}
-  }));
+  if (uniqueIds.length === 0) return;
+  try {
+    await ctx.api.deleteMessages(chatId, uniqueIds);
+  } catch (_) {
+    await Promise.all(uniqueIds.map(async (msgId) => {
+      try {
+        await ctx.api.deleteMessage(chatId, msgId);
+      } catch (_) {}
+    }));
+  }
 }
 
 // NATIVE MATH EVALUATOR
@@ -303,10 +308,9 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
-          const kb = new InlineKeyboard().text("❌ Cancel", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           return ctx.reply(
             `Reply to this message with your Project Name and Currency (e.g. <code>Party $</code>):\n\n<span class="tg-spoiler">[Action: new_prompt_${cmdMsgId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: kb }
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
           );
         }
         await processNew(ctx, args, cmdMsgId ? [cmdMsgId] : []);
@@ -318,10 +322,9 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
-          const kb = new InlineKeyboard().text("❌ Cancel", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           return ctx.reply(
             `Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code>):\n\n<span class="tg-spoiler">[Action: add_prompt_${cmdMsgId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: kb }
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
           );
         }
         await processAdd(ctx, args, cmdMsgId ? [cmdMsgId] : []);
@@ -333,10 +336,9 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
-          const kb = new InlineKeyboard().text("❌ Cancel", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           return ctx.reply(
             `Reply to this message with the amount you are transferring (e.g. <code>50000</code>):\n\n<span class="tg-spoiler">[Action: pay_prompt_${cmdMsgId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: kb }
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
           );
         }
         await processPay(ctx, args, cmdMsgId ? [cmdMsgId] : []);
