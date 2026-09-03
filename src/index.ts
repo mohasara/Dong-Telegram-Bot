@@ -303,9 +303,10 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
+          const kb = new InlineKeyboard().text("❌ Cancel", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           return ctx.reply(
             `Reply to this message with your Project Name and Currency (e.g. <code>Party $</code>):\n\n<span class="tg-spoiler">[Action: new_prompt_${cmdMsgId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true } }
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: kb }
           );
         }
         await processNew(ctx, args, cmdMsgId ? [cmdMsgId] : []);
@@ -317,9 +318,10 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
+          const kb = new InlineKeyboard().text("❌ Cancel", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           return ctx.reply(
             `Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code>):\n\n<span class="tg-spoiler">[Action: add_prompt_${cmdMsgId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true } }
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: kb }
           );
         }
         await processAdd(ctx, args, cmdMsgId ? [cmdMsgId] : []);
@@ -331,9 +333,10 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
+          const kb = new InlineKeyboard().text("❌ Cancel", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           return ctx.reply(
             `Reply to this message with the amount you are transferring (e.g. <code>50000</code>):\n\n<span class="tg-spoiler">[Action: pay_prompt_${cmdMsgId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true } }
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: kb }
           );
         }
         await processPay(ctx, args, cmdMsgId ? [cmdMsgId] : []);
@@ -391,7 +394,8 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const kb = new InlineKeyboard();
         for (const p of active) {
-          kb.text(`Close: ${p.name}`, `closeproj_${p.id}`).row();
+          const data = cmdMsgId ? `closeproj_${p.id}_${cmdMsgId}` : `closeproj_${p.id}`;
+          kb.text(`Close: ${p.name}`, data).row();
         }
         kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         await ctx.reply("⚠️ <b>Select a project to close:</b>\n(Note: All balances must be settled first)", { parse_mode: "HTML", reply_markup: kb });
@@ -406,7 +410,7 @@ export default {
         if (!replyTo || !replyTo.text) return next();
 
         // Catch missing argument prompts
-        const actionMatch = replyTo.text.match(/\[Action:\s*([^_\]]+)(?:_(\d+))?\]/);
+        const actionMatch = replyTo.text.match(/\[Action:\s*(new_prompt|add_prompt|pay_prompt)(?:_(\d+))?\]/);
         if (actionMatch) {
           const action = actionMatch[1];
           const origCmdId = actionMatch[2] ? Number(actionMatch[2]) : 0;
@@ -860,26 +864,33 @@ export default {
         else await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
       }
 
-      bot.callbackQuery(/^closeproj_(\d+)$/, async (ctx) => {
+      bot.callbackQuery(/^closeproj_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         const projId = Number(ctx.match[1]);
+        const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
         const proj = await getProjectById(env.DB, projId);
         if (!proj) return;
         const { netBalances } = await calculateBalances(env.DB, projId);
 
         const unsettled = Object.values(netBalances).some(b => Math.abs(b) > 0.01);
         if (unsettled) {
-          const kb = new InlineKeyboard().text("❌ Close", "closemsg");
+          const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           await ctx.editMessageText(
             `❌ <b>Cannot close ${proj.name}!</b>\n\nThere are still unsettled debts. Run /settle to see who needs to pay whom, and log payments with /pay.`,
             { parse_mode: "HTML", reply_markup: kb }
           );
+          if (ctx.chat && cmdMsgId) {
+            await deleteMessages(ctx, ctx.chat.id, [cmdMsgId]);
+          }
           return;
         }
 
         await env.DB.prepare("UPDATE projects SET status = 'ended' WHERE id = ?").bind(projId).run();
-        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
+        const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         await ctx.editMessageText(`🔒 <b>Project ${proj.name} is now officially closed and archived.</b>`, { parse_mode: "HTML", reply_markup: kb });
+        if (ctx.chat && cmdMsgId) {
+          await deleteMessages(ctx, ctx.chat.id, [cmdMsgId]);
+        }
       });
 
       // --- DISMISSAL / CLEANUP HANDLERS ---
