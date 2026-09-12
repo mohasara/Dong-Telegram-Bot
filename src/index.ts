@@ -280,19 +280,48 @@ export default {
         console.error("Unhandled error in bot handler:", err.error || err);
       });
 
-      const processNew = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
+      const createProjectAndFinish = async (ctx: Context, name: string, currency: string, draftId: string, msgIds: number[]) => {
         if (!ctx.chat) return;
-        if (!args || args.length === 0) return ctx.reply("❌ Missing project name.");
-        const name = args[0]; const currency = args[1] || "";
         const proj = await env.DB.prepare("INSERT INTO projects (chat_id, name, currency) VALUES (?, ?, ?) RETURNING id").bind(ctx.chat.id, name, currency).first() as any;
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(proj.id, ctx.from!.id, ctx.from!.first_name).run();
+        if (draftId) await deleteDraft(env.DB, draftId);
 
-        const mainCmdId = initialMsgIds.find(id => id > 0) || 0;
+        const mainCmdId = msgIds.find(id => id > 0) || 0;
         const kb = new InlineKeyboard().text("✋ Join Project", mainCmdId ? `join_${proj.id}_${mainCmdId}` : `join_${proj.id}`).text("✅ Done Adding", mainCmdId ? `join_done_${proj.id}_${mainCmdId}` : `join_done_${proj.id}`);
         await ctx.reply(`🎉 Project <b>${escapeHtml(name)}</b>${currency ? ' (' + escapeHtml(currency) + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${escapeHtml(ctx.from!.first_name)}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${proj.id}_${mainCmdId}]</span>`, { parse_mode: "HTML", reply_markup: kb });
 
-        if (initialMsgIds.length > 0) {
-          await deleteMessages(ctx, ctx.chat.id, initialMsgIds);
+        if (msgIds.length > 0) {
+          await deleteMessages(ctx, ctx.chat.id, msgIds);
+        }
+      };
+
+      const processNew = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
+        if (!ctx.chat) return;
+        if (!args || args.length === 0) return ctx.reply("❌ Missing project name.");
+        let name = args[0];
+        let currency = "";
+        if (args.length === 2) {
+          currency = args[1];
+        } else if (args.length > 2) {
+          const last = args[args.length - 1];
+          if (/^[$€£¥﷼]|^(USD|EUR|GBP|IRR|TOMAN|CAD|AUD)$/i.test(last)) {
+            name = args.slice(0, -1).join(" ");
+            currency = last;
+          } else {
+            name = args.join(" ");
+          }
+        }
+        await createProjectAndFinish(ctx, name, currency, "", initialMsgIds);
+      };
+
+      const startAddPayerFlow = async (ctx: Context, draftId: string, draft: any) => {
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "add", draftId);
+        draft.projectId = projectId;
+        draft.payerId = null;
+        draft.splitWith = [];
+        await saveDraft(env.DB, draftId, draft);
+        if (projectId) {
+          await promptPayerSelection(ctx, env.DB, draftId, projectId, draft.amount, draft.desc);
         }
       };
 
@@ -311,9 +340,9 @@ export default {
         }
 
         const draftId = `exp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "add", draftId);
-        await saveDraft(env.DB, draftId, { amount, desc, projectId, payerId: null, splitWith: [], msgIds: initialMsgIds });
-        if (projectId) await promptPayerSelection(ctx, env.DB, draftId, projectId, amount, desc);
+        const draft = { amount, desc, projectId: null, payerId: null, splitWith: [], msgIds: initialMsgIds, step: "payer" };
+        await saveDraft(env.DB, draftId, draft);
+        await startAddPayerFlow(ctx, draftId, draft);
       };
 
       const processPay = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
@@ -383,10 +412,13 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
-          return ctx.reply(
-            `Reply to this message with your Project Name and Currency (e.g. <code>Party $</code>):\n\n<span class="tg-spoiler">[Action: new_prompt_${cmdMsgId}]</span>`,
+          const draftId = `new_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+          const promptMsg = await ctx.reply(
+            `Reply to this message with your <b>Project Name</b> (e.g. <code>Party</code> or <code>Trip to Paris</code>):\n\n<span class="tg-spoiler">[Action: new_step1_${draftId}]</span>`,
             { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
           );
+          await saveDraft(env.DB, draftId, { step: "name", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id])) });
+          return;
         }
         await processNew(ctx, args, cmdMsgId ? [cmdMsgId] : []);
       });
@@ -397,10 +429,13 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
-          return ctx.reply(
-            `Reply to this message with the Amount and an optional Description (e.g. <code>50000 Taxi</code> or <code>2000+3000 Taxi</code>):\n\n<span class="tg-spoiler">[Action: add_prompt_${cmdMsgId}]</span>`,
+          const draftId = `exp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+          const promptMsg = await ctx.reply(
+            `Reply to this message with the <b>Expense Amount</b> (e.g. <code>50000</code> or <code>2000+3000</code>):\n\n<span class="tg-spoiler">[Action: add_step1_${draftId}]</span>`,
             { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
           );
+          await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id])) });
+          return;
         }
         await processAdd(ctx, args, cmdMsgId ? [cmdMsgId] : []);
       });
@@ -411,10 +446,13 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
-          return ctx.reply(
-            `Reply to this message with the amount you are transferring (e.g. <code>50000</code> or <code>10000/2</code>):\n\n<span class="tg-spoiler">[Action: pay_prompt_${cmdMsgId}]</span>`,
+          const draftId = `pay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+          const promptMsg = await ctx.reply(
+            `Reply to this message with the amount you are transferring (e.g. <code>50000</code> or <code>10000/2</code>):\n\n<span class="tg-spoiler">[Action: pay_step1_${draftId}]</span>`,
             { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
           );
+          await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id])) });
+          return;
         }
         await processPay(ctx, args, cmdMsgId ? [cmdMsgId] : []);
       });
@@ -529,7 +567,147 @@ export default {
           return;
         }
 
-        // Catch missing argument prompts
+        // --- Step-by-Step /new: Step 1 (Project Name) ---
+        const newStep1Match = replyTo.text.match(/\[Action:\s*new_step1_([a-zA-Z0-9_]+)\]/);
+        if (newStep1Match) {
+          const draftId = newStep1Match[1];
+          const draft = await getDraft(env.DB, draftId);
+          if (!draft) return ctx.reply("❌ Session expired. Please run /new again.");
+
+          const text = ctx.message.text.trim();
+          if (!text) return ctx.reply("❌ Please provide a valid project name.");
+
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
+          
+          // Check if user already provided name and currency in this single reply
+          const parts = text.split(/\s+/).filter(Boolean);
+          if (parts.length > 1) {
+            const last = parts[parts.length - 1];
+            if (/^[$€£¥﷼]|^(USD|EUR|GBP|IRR|TOMAN|CAD|AUD)$/i.test(last)) {
+              const name = parts.slice(0, -1).join(" ");
+              const currency = last;
+              await createProjectAndFinish(ctx, name, currency, draftId, draft.msgIds);
+              return;
+            }
+          }
+
+          draft.name = text;
+          draft.step = "currency";
+          await saveDraft(env.DB, draftId, draft);
+
+          const kb = new InlineKeyboard()
+            .text("⏩ Skip", `new_skip_curr_${draftId}`)
+            .text("❌ Cancel", `canceldraft_${draftId}`);
+          const prompt2 = await ctx.reply(
+            `Project Name: <b>${escapeHtml(draft.name)}</b>\n\nReply to this message with a <b>Currency</b> (e.g. <code>$</code>, <code>€</code>, <code>Toman</code>), or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: new_step2_${draftId}]</span>`,
+            { parse_mode: "HTML", reply_parameters: { message_id: ctx.message.message_id }, reply_markup: kb }
+          );
+          draft.msgIds.push(prompt2.message_id);
+          await saveDraft(env.DB, draftId, draft);
+          return;
+        }
+
+        // --- Step-by-Step /new: Step 2 (Currency) ---
+        const newStep2Match = replyTo.text.match(/\[Action:\s*new_step2_([a-zA-Z0-9_]+)\]/);
+        if (newStep2Match) {
+          const draftId = newStep2Match[1];
+          const draft = await getDraft(env.DB, draftId);
+          if (!draft) return ctx.reply("❌ Session expired. Please run /new again.");
+
+          let currency = ctx.message.text.trim();
+          if (currency === "-" || currency.toLowerCase() === "skip" || currency.toLowerCase() === "none") {
+            currency = "";
+          }
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
+          await createProjectAndFinish(ctx, draft.name, currency, draftId, draft.msgIds);
+          return;
+        }
+
+        // --- Step-by-Step /add: Step 1 (Amount) ---
+        const addStep1Match = replyTo.text.match(/\[Action:\s*add_step1_([a-zA-Z0-9_]+)\]/);
+        if (addStep1Match) {
+          const draftId = addStep1Match[1];
+          const draft = await getDraft(env.DB, draftId);
+          if (!draft) return ctx.reply("❌ Session expired. Please run /add again.");
+
+          const raw = ctx.message.text.trim();
+          const { mathExpr, desc: parsedDesc } = parseMathInput(raw);
+          if (!mathExpr) return ctx.reply("❌ Missing expense amount. Please reply with an amount (e.g. <code>50000</code> or <code>2000+3000</code>):", { parse_mode: "HTML" });
+          const evaluated = safeEval(mathExpr);
+          if (isNaN(evaluated) || !isFinite(evaluated) || evaluated <= 0) {
+            return ctx.reply(`❌ Invalid math or amount: '<code>${escapeHtml(mathExpr)}</code>'`, { parse_mode: "HTML" });
+          }
+          const amount = Math.round(evaluated * 100) / 100;
+          draft.amount = amount;
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
+
+          if (parsedDesc) {
+            draft.desc = parsedDesc;
+            draft.step = "payer";
+            await saveDraft(env.DB, draftId, draft);
+            return startAddPayerFlow(ctx, draftId, draft);
+          }
+
+          draft.step = "desc";
+          await saveDraft(env.DB, draftId, draft);
+          const kb = new InlineKeyboard()
+            .text("⏩ Skip", `add_skip_desc_${draftId}`)
+            .text("❌ Cancel", `canceldraft_${draftId}`);
+          const prompt2 = await ctx.reply(
+            `Amount: <b>${amount}</b>\n\nReply to this message with an optional <b>Description</b> (e.g. <code>Taxi</code>, <code>Dinner</code>), or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`,
+            { parse_mode: "HTML", reply_parameters: { message_id: ctx.message.message_id }, reply_markup: kb }
+          );
+          draft.msgIds.push(prompt2.message_id);
+          await saveDraft(env.DB, draftId, draft);
+          return;
+        }
+
+        // --- Step-by-Step /add: Step 2 (Description) ---
+        const addStep2Match = replyTo.text.match(/\[Action:\s*add_step2_([a-zA-Z0-9_]+)\]/);
+        if (addStep2Match) {
+          const draftId = addStep2Match[1];
+          const draft = await getDraft(env.DB, draftId);
+          if (!draft) return ctx.reply("❌ Session expired. Please run /add again.");
+
+          let desc = ctx.message.text.trim();
+          if (!desc || desc === "-" || desc.toLowerCase() === "skip" || desc.toLowerCase() === "none") {
+            desc = new Date().toISOString().replace('T', ' ').substring(0, 16);
+          }
+          draft.desc = desc;
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
+          draft.step = "payer";
+          await saveDraft(env.DB, draftId, draft);
+          return startAddPayerFlow(ctx, draftId, draft);
+        }
+
+        // --- Step-by-Step /pay: Step 1 (Amount) ---
+        const payStep1Match = replyTo.text.match(/\[Action:\s*pay_step1_([a-zA-Z0-9_]+)\]/);
+        if (payStep1Match) {
+          const draftId = payStep1Match[1];
+          const draft = await getDraft(env.DB, draftId);
+          if (!draft) return ctx.reply("❌ Session expired. Please run /pay again.");
+
+          const raw = ctx.message.text.trim();
+          const { mathExpr } = parseMathInput(raw);
+          if (!mathExpr) return ctx.reply("❌ Missing payment amount. Please reply with an amount (e.g. <code>50000</code> or <code>10000/2</code>):", { parse_mode: "HTML" });
+          const evaluated = safeEval(mathExpr);
+          if (isNaN(evaluated) || !isFinite(evaluated) || evaluated <= 0) {
+            return ctx.reply(`❌ Invalid math or amount: '<code>${escapeHtml(mathExpr)}</code>'`, { parse_mode: "HTML" });
+          }
+          const amount = Math.round(evaluated * 100) / 100;
+          draft.amount = amount;
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
+
+          const { projectId } = await routeProjectCommand(ctx, env.DB, "pay", draftId);
+          draft.projectId = projectId;
+          draft.fromId = null;
+          draft.toId = null;
+          await saveDraft(env.DB, draftId, draft);
+          if (projectId) await promptPaySender(ctx, env.DB, draftId, projectId, amount);
+          return;
+        }
+
+        // Catch legacy missing argument prompts (if any)
         const actionMatch = replyTo.text.match(/\[Action:\s*(new_prompt|add_prompt|pay_prompt)(?:_(\d+))?\]/);
         if (actionMatch) {
           const action = actionMatch[1];
@@ -640,6 +818,26 @@ export default {
         } catch (_) {}
       });
 
+      // --- STEP-BY-STEP SKIP HANDLERS ---
+      bot.callbackQuery(/^new_skip_curr_([a-zA-Z0-9_]+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[1];
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft) return;
+        await createProjectAndFinish(ctx, draft.name, "", draftId, draft.msgIds || []);
+      });
+
+      bot.callbackQuery(/^add_skip_desc_([a-zA-Z0-9_]+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[1];
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft) return;
+        draft.desc = new Date().toISOString().replace('T', ' ').substring(0, 16);
+        draft.step = "payer";
+        await saveDraft(env.DB, draftId, draft);
+        return startAddPayerFlow(ctx, draftId, draft);
+      });
+
       // --- ADD EXPENSE CALLBACKS ---
       bot.callbackQuery(/^selproj_add_(\d+)_(exp_.+)$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
@@ -724,15 +922,17 @@ export default {
         for (const uid of draft.splitWith) await env.DB.prepare("INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)").bind(exp.id, uid, share).run();
         
         await deleteDraft(env.DB, draftId);
-        const idsPayload = (draft.msgIds || []).filter((id: any): id is number => typeof id === "number" && id > 0).join("_");
+        const currentMsgId = ctx.callbackQuery?.message?.message_id;
+        const toDelete = (draft.msgIds || []).filter((id: any): id is number => typeof id === "number" && id > 0 && id !== currentMsgId);
+        const idsPayload = toDelete.join("_");
         const kb = new InlineKeyboard()
           .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
           .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
         await ctx.editMessageText(`✅ <b>Expense Saved!</b>\n🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n\n<i>Split equally between ${draft.splitWith.length} people.</i>`, { parse_mode: "HTML", reply_markup: kb });
 
         // Delete previous messages of this flow after showing the last message
-        if (ctx.chat && draft.msgIds && draft.msgIds.length > 0) {
-          await deleteMessages(ctx, ctx.chat.id, draft.msgIds);
+        if (ctx.chat && toDelete.length > 0) {
+          await deleteMessages(ctx, ctx.chat.id, toDelete);
         }
       });
 
@@ -829,15 +1029,17 @@ export default {
         if (!draft) return;
         const t = await env.DB.prepare("INSERT INTO settlements (project_id, from_user_id, to_user_id, amount) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.fromId, Number(ctx.match[2]), draft.amount).first() as any;
         await deleteDraft(env.DB, draftId);
-        const idsPayload = (draft.msgIds || []).filter((id: any): id is number => typeof id === "number" && id > 0).join("_");
+        const currentMsgId = ctx.callbackQuery?.message?.message_id;
+        const toDelete = (draft.msgIds || []).filter((id: any): id is number => typeof id === "number" && id > 0 && id !== currentMsgId);
+        const idsPayload = toDelete.join("_");
         const kb = new InlineKeyboard()
           .text("↩️ Undo", `delpay_${t.id}_${draft.projectId}`)
           .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
         await ctx.editMessageText(`✅ <b>Payment Recorded!</b>\nAmount: ${draft.amount}`, { parse_mode: "HTML", reply_markup: kb });
 
         // Delete original command and prompts at the end of the payment flow
-        if (ctx.chat && draft.msgIds && draft.msgIds.length > 0) {
-          await deleteMessages(ctx, ctx.chat.id, draft.msgIds);
+        if (ctx.chat && toDelete.length > 0) {
+          await deleteMessages(ctx, ctx.chat.id, toDelete);
         }
       });
 
