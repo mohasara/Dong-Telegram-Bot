@@ -1,9 +1,28 @@
-import { Bot, webhookCallback, InlineKeyboard, Context } from "grammy";
+import { Bot, webhookCallback, InlineKeyboard, Keyboard, Context } from "grammy";
 
 export interface Env {
   DB: D1Database;
   BOT_TOKEN: string;
 }
+
+export const GROUP_COMMANDS = [
+  { command: "new", description: "Create a new project" },
+  { command: "add", description: "Record an expense (supports math: 5000+2000 Taxi)" },
+  { command: "pay", description: "Record a repayment transfer" },
+  { command: "balances", description: "View member balances & breakdown" },
+  { command: "settle", description: "Optimal settlement plan (who pays whom)" },
+  { command: "report", description: "Full group spending report" },
+  { command: "projects", description: "List all active and closed projects" },
+  { command: "delete", description: "Recent ledger & delete entries" },
+  { command: "close", description: "Close & archive a settled project" },
+  { command: "help", description: "How to use Dong Bot" },
+];
+
+export const pvKeyboard = new Keyboard()
+  .text("👤 My Balances").text("📁 My Projects").row()
+  .text("❓ Help & Guide")
+  .resized()
+  .persistent();
 
 // ----------------------------------------------------
 // DATABASE & COMPUTATION HELPERS
@@ -274,6 +293,14 @@ async function routeProjectCommand(ctx: Context, db: D1Database, action: string,
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/setcommands") {
+      const bot = new Bot(env.BOT_TOKEN);
+      await bot.api.setMyCommands(GROUP_COMMANDS, { scope: { type: "all_group_chats" } });
+      await bot.api.setMyCommands([{ command: "start", description: "Open bot menu" }], { scope: { type: "all_private_chats" } });
+      return new Response("Commands registered for all_group_chats and configured for all_private_chats.", { status: 200 });
+    }
+
     if (request.method === "POST") {
       const bot = new Bot(env.BOT_TOKEN);
       bot.catch((err) => {
@@ -360,17 +387,114 @@ export default {
       };
 
       // ====================================================
-      // 1. COMMANDS
+      // 1. PRIVATE CHAT (PV) SCREENS & HANDLERS
+      // ====================================================
+
+      const showPrivateBalances = async (ctx: Context) => {
+        if (!ctx.from) return;
+        const userId = ctx.from.id;
+        const { results: memberships } = await env.DB.prepare(
+          "SELECT p.id, p.name, p.currency FROM project_members pm JOIN projects p ON pm.project_id = p.id WHERE pm.user_id = ? AND p.status = 'active'"
+        ).bind(userId).all();
+
+        if (!memberships || memberships.length === 0) {
+          return ctx.reply("You are not part of any active projects yet.", { reply_markup: pvKeyboard });
+        }
+
+        let report = `👤 <b>Your Balances Across All Projects:</b>\n\n`;
+        const kb = new InlineKeyboard();
+        for (const proj of (memberships as any[])) {
+          const { netBalances } = await calculateBalances(env.DB, proj.id);
+          const bal = netBalances[userId] || 0;
+          const icon = bal > 0.01 ? "🟢" : bal < -0.01 ? "🔴" : "⚪";
+          report += `${icon} <b>${escapeHtml(proj.name)}:</b> ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
+          kb.text(`📊 Breakdown: ${proj.name}`, `pv_proj_${proj.id}`).row();
+        }
+        report += `\n<i>Tap a project below to see who owes whom:</i>`;
+        await ctx.reply(report, { parse_mode: "HTML", reply_markup: kb });
+      };
+
+      const showPrivateProjects = async (ctx: Context) => {
+        if (!ctx.from) return;
+        const userId = ctx.from.id;
+        const { results: projects } = await env.DB.prepare(
+          "SELECT p.id, p.name, p.currency, p.status, (SELECT COUNT(*) FROM project_members WHERE project_id = p.id) as member_count FROM project_members pm JOIN projects p ON pm.project_id = p.id WHERE pm.user_id = ? ORDER BY p.id DESC LIMIT 10"
+        ).bind(userId).all();
+
+        if (!projects || projects.length === 0) {
+          return ctx.reply("You have not joined any projects yet.", { reply_markup: pvKeyboard });
+        }
+
+        let msg = `📁 <b>Your Projects:</b>\n\n`;
+        const kb = new InlineKeyboard();
+        for (const p of (projects as any[])) {
+          const icon = p.status === 'active' ? '🟢' : '🔒';
+          msg += `${icon} <b>${escapeHtml(p.name)}</b>${p.currency ? ' (' + escapeHtml(p.currency) + ')' : ''}\n`;
+          msg += `   👥 Members: ${p.member_count} | Status: <b>${p.status.toUpperCase()}</b>\n\n`;
+          kb.text(`🔍 Details: ${p.name}`, `pv_proj_${p.id}`).row();
+        }
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
+      };
+
+      const showPrivateHelp = async (ctx: Context) => {
+        const msg = 
+          `👋 <b>Dong Split Bot Guide</b>\n\n` +
+          `<b>How to use in groups:</b>\n` +
+          `1. Add me to your group.\n` +
+          `2. Type <code>/new &lt;Name&gt; [Currency]</code> to create a project.\n` +
+          `3. Group members tap <b>Join Project</b>.\n` +
+          `4. Log expenses with <code>/add 5000 Taxi</code> (supports math: <code>2000+3000</code>).\n` +
+          `5. Check balances anytime with <code>/balances</code> or <code>/settle</code>.\n` +
+          `6. Record repayments with <code>/pay 1000</code>.\n` +
+          `7. When all debts are zero, close the project with <code>/close</code>.\n\n` +
+          `<i>In this private chat, you can tap the buttons below anytime to check your balances and projects!</i>`;
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: pvKeyboard });
+      };
+
+      bot.hears("👤 My Balances", async (ctx) => {
+        if (ctx.chat?.type === "private") await showPrivateBalances(ctx);
+      });
+
+      bot.hears("📁 My Projects", async (ctx) => {
+        if (ctx.chat?.type === "private") await showPrivateProjects(ctx);
+      });
+
+      bot.hears("❓ Help & Guide", async (ctx) => {
+        if (ctx.chat?.type === "private") await showPrivateHelp(ctx);
+      });
+
+      bot.hears(/^(my\s*balance|balances|حساب)$/i, async (ctx) => {
+        if (ctx.chat?.type === "private") await showPrivateBalances(ctx);
+      });
+
+      bot.hears(/^(projects|پروژه.*)$/i, async (ctx) => {
+        if (ctx.chat?.type === "private") await showPrivateProjects(ctx);
+      });
+
+      bot.hears(/^(help|راهنما)$/i, async (ctx) => {
+        if (ctx.chat?.type === "private") await showPrivateHelp(ctx);
+      });
+
+      // ====================================================
+      // 2. COMMANDS
       // ====================================================
 
       bot.command("start", async (ctx) => {
         if (!ctx.chat) return;
-        if (ctx.chat.type === "private") return ctx.reply("👋 Welcome to Dong Split Bot!\n\nAdd me to a group to manage shared expenses.\nUse /mybalance here to see what you owe.");
+        if (ctx.chat.type === "private") {
+          return ctx.reply(
+            `👋 <b>Welcome to Dong Split Bot!</b>\n\n` +
+            `Here in private chat, you can check your debts, credits, and active projects across all your groups without using slash commands.\n\n` +
+            `👇 <b>Tap a button below:</b>`,
+            { parse_mode: "HTML", reply_markup: pvKeyboard }
+          );
+        }
         await ctx.reply("👋 Dong Bot is active!\n\nCreate a project with: <code>/new &lt;Name&gt; [Currency]</code>\nType /help to see all commands.", { parse_mode: "HTML" });
       });
 
       bot.command("help", async (ctx) => {
         if (!ctx.chat) return;
+        if (ctx.chat.type === "private") return showPrivateHelp(ctx);
         const msg = 
           `📖 <b>Dong Split Bot Commands:</b>\n\n` +
           `• <code>/new &lt;Name&gt; [Currency]</code> — Create a new project\n` +
@@ -388,22 +512,8 @@ export default {
 
       bot.command("mybalance", async (ctx) => {
         if (!ctx.chat) return;
-        if (ctx.chat.type !== "private") return ctx.reply("Use /balances inside your group, or use /mybalance in private chat.");
-        const userId = ctx.from!.id;
-        const { results: memberships } = await env.DB.prepare(
-          "SELECT p.id, p.name, p.currency FROM project_members pm JOIN projects p ON pm.project_id = p.id WHERE pm.user_id = ? AND p.status = 'active'"
-        ).bind(userId).all();
-
-        if (!memberships || memberships.length === 0) return ctx.reply("You are not part of any active projects.");
-
-        let report = `👤 <b>Your Balances Across All Projects:</b>\n\n`;
-        for (const proj of (memberships as any[])) {
-          const { netBalances } = await calculateBalances(env.DB, proj.id);
-          const bal = netBalances[userId] || 0;
-          const icon = bal >= 0 ? "🟢" : "🔴";
-          report += `${icon} <b>${escapeHtml(proj.name)}:</b> ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
-        }
-        await ctx.reply(report, { parse_mode: "HTML" });
+        if (ctx.chat.type !== "private") return ctx.reply("Use /balances inside your group, or use private chat.");
+        await showPrivateBalances(ctx);
       });
 
       bot.command("new", async (ctx) => {
@@ -1229,6 +1339,59 @@ export default {
         await ctx.editMessageText(`🔒 <b>Project ${escapeHtml(proj.name)} is now officially closed and archived.</b>`, { parse_mode: "HTML", reply_markup: kb });
         if (ctx.chat && cmdMsgId) {
           await deleteMessages(ctx, ctx.chat.id, [cmdMsgId]);
+        }
+      });
+
+      // --- PRIVATE CHAT (PV) NAVIGATION CALLBACKS ---
+      bot.callbackQuery(/^pv_proj_(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const projId = Number(ctx.match[1]);
+        const proj = await getProjectById(env.DB, projId);
+        if (!proj) return;
+        const userId = ctx.from.id;
+        const { netBalances, names, totalPaid, totalShare } = await calculateBalances(env.DB, projId);
+        const myBal = netBalances[userId] || 0;
+
+        let msg = `📁 <b>${escapeHtml(proj.name)}</b> (${proj.status.toUpperCase()})\n\n`;
+        const transactions = getSettlementTransactions(netBalances);
+        const myDebts = transactions.filter(t => t.from === userId);
+        const myCredits = transactions.filter(t => t.to === userId);
+
+        if (myDebts.length > 0 || myCredits.length > 0) {
+          msg += `🧾 <b>Debts in this project:</b>\n`;
+          myDebts.forEach(d => msg += `🔴 You owe <b>${d.amount.toFixed(2)}</b> to ${escapeHtml(names[d.to] || 'Unknown')}\n`);
+          myCredits.forEach(c => msg += `🟢 You get <b>${c.amount.toFixed(2)}</b> from ${escapeHtml(names[c.from] || 'Unknown')}\n`);
+          msg += `\n`;
+        } else {
+          msg += `✅ <b>No pending debts in this project!</b>\n\n`;
+        }
+
+        msg += `💰 <b>Total Paid:</b> ${totalPaid[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
+        msg += `🍽️ <b>Your Share:</b> ${totalShare[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
+        msg += `------------------------------------\n`;
+        if (myBal > 0.01) msg += `🟢 <b>Net Total:</b> Gets back <b>+${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}</b>`;
+        else if (myBal < -0.01) msg += `🔴 <b>Net Total:</b> Owes <b>${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}</b>`;
+        else msg += `⚪ <b>Net Total:</b> Settled ($0.00)`;
+
+        const kb = new InlineKeyboard()
+          .text("« My Balances", "pv_back_bal")
+          .text("« My Projects", "pv_back_proj");
+        await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      bot.callbackQuery("pv_back_bal", async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        if (ctx.chat?.type === "private") {
+          await ctx.deleteMessage().catch(() => {});
+          await showPrivateBalances(ctx);
+        }
+      });
+
+      bot.callbackQuery("pv_back_proj", async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        if (ctx.chat?.type === "private") {
+          await ctx.deleteMessage().catch(() => {});
+          await showPrivateProjects(ctx);
         }
       });
 
