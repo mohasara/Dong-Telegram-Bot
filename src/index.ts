@@ -268,7 +268,11 @@ function solveSettlement(netBalances: Record<number, number>, names: Record<numb
 async function routeProjectCommand(ctx: Context, db: D1Database, action: string, payload: string = "", cmdMsgId: number = 0): Promise<{ projectId: number | null }> {
   if (!ctx.chat) return { projectId: null };
   const active = await getActiveProjects(db, ctx.chat.id);
-  if (active.length === 0) { await ctx.reply("❌ No active projects."); return { projectId: null }; }
+  if (active.length === 0) {
+    const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+    await ctx.reply("❌ No active projects.", { reply_markup: kb });
+    return { projectId: null };
+  }
   if (active.length === 1) return { projectId: active[0].id };
   const kb = new InlineKeyboard();
   for (const p of active) {
@@ -343,8 +347,8 @@ export default {
 
       const promptAddDescription = async (ctx: Context, db: D1Database, draftId: string, draft: any) => {
         const promptText = draft.isItemized
-          ? `⚡ <b>Unequal Expense</b> (Total will be calculated from individual shares)\n\nReply to this message with an optional <b>Description</b> (e.g. <code>Taxi</code>, <code>Dinner</code>), or send <code>-</code> to skip:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`
-          : `Amount: <b>${draft.amount}</b>\n\nReply to this message with an optional <b>Description</b> (e.g. <code>Taxi</code>, <code>Dinner</code>), or send <code>-</code> to skip:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`;
+          ? `⚡ <b>Unequal Expense</b> (Total will be calculated from individual shares)\n\nReply to this message with an optional <b>Description</b> (e.g. <code>Taxi</code>, <code>Dinner</code>), or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`
+          : `Amount: <b>${draft.amount}</b>\n\nReply to this message with an optional <b>Description</b> (e.g. <code>Taxi</code>, <code>Dinner</code>), or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`;
 
         const replyToId = ctx.message?.message_id || ctx.callbackQuery?.message?.message_id;
         const promptMsg = await ctx.reply(promptText, {
@@ -352,10 +356,17 @@ export default {
           reply_parameters: replyToId ? { message_id: replyToId } : undefined,
           reply_markup: {
             force_reply: true,
-            input_field_placeholder: "Description or send - to skip"
+            input_field_placeholder: "Description or tap Skip"
           }
         });
-        draft.msgIds = Array.from(new Set([...(draft.msgIds || []), promptMsg.message_id]));
+        const kb = new InlineKeyboard()
+          .text("⏩ Skip", `add_skip_desc_${draftId}`)
+          .text("❌ Cancel", `canceldraft_${draftId}`);
+        const optMsg = await ctx.reply(
+          `<i>Quick actions:</i>\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`,
+          { parse_mode: "HTML", reply_markup: kb }
+        );
+        draft.msgIds = Array.from(new Set([...(draft.msgIds || []), promptMsg.message_id, optMsg.message_id]));
         await saveDraft(db, draftId, draft);
       };
 
@@ -507,7 +518,8 @@ export default {
             { parse_mode: "HTML", reply_markup: pvKeyboard }
           );
         }
-        await ctx.reply("👋 Dong Bot is active!\n\nCreate a project with: <code>/new &lt;Name&gt; [Currency]</code>\nType /help to see all commands.", { parse_mode: "HTML" });
+        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
+        await ctx.reply("👋 Dong Bot is active!\n\nCreate a project with: <code>/new &lt;Name&gt; [Currency]</code>\nType /help to see all commands.", { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.command("help", async (ctx) => {
@@ -525,7 +537,8 @@ export default {
           `• <code>/delete</code> — View recent ledger and delete entries\n` +
           `• <code>/close</code> — Close and archive a settled project\n` +
           `• <code>/mybalance</code> — Check your balances in private chat\n`;
-        await ctx.reply(msg, { parse_mode: "HTML" });
+        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.command("mybalance", async (ctx) => {
@@ -545,7 +558,12 @@ export default {
             `Reply to this message with your <b>Project Name</b> (e.g. <code>Party</code> or <code>Trip to Paris</code>):\n\n<span class="tg-spoiler">[Action: new_step1_${draftId}]</span>`,
             { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, input_field_placeholder: "Project Name (e.g. Party)" } }
           );
-          await saveDraft(env.DB, draftId, { step: "name", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id])) });
+          const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+          const optMsg = await ctx.reply(
+            `<i>Tap below to cancel:</i>\n<span class="tg-spoiler">[Action: new_step1_${draftId}]</span>`,
+            { parse_mode: "HTML", reply_markup: kb }
+          );
+          await saveDraft(env.DB, draftId, { step: "name", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id, optMsg.message_id])) });
           return;
         }
         await processNew(ctx, args, cmdMsgId ? [cmdMsgId] : []);
@@ -558,13 +576,6 @@ export default {
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
           const draftId = `exp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-          const kb = new InlineKeyboard()
-            .text("⚡ Unequal Share", `add_itemized_${draftId}`)
-            .text("❌ Cancel", `canceldraft_${draftId}`);
-          const optMsg = await ctx.reply(
-            `<i>Don't know the total amount? Tap below:</i>`,
-            { parse_mode: "HTML", reply_markup: kb }
-          );
           const promptMsg = await ctx.reply(
             `Reply to this message with the <b>Expense Amount</b> (e.g. <code>50000</code> or <code>2000+3000</code>):\n\n<span class="tg-spoiler">[Action: add_step1_${draftId}]</span>`,
             {
@@ -573,7 +584,14 @@ export default {
               reply_markup: { force_reply: true, input_field_placeholder: "Expense Amount (e.g. 50000)" }
             }
           );
-          await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), optMsg.message_id, promptMsg.message_id])) });
+          const kb = new InlineKeyboard()
+            .text("⚡ Unequal Share", `add_itemized_${draftId}`)
+            .text("❌ Cancel", `canceldraft_${draftId}`);
+          const optMsg = await ctx.reply(
+            `<i>Don't know the total amount? Tap below:</i>\n<span class="tg-spoiler">[Action: add_step1_${draftId}]</span>`,
+            { parse_mode: "HTML", reply_markup: kb }
+          );
+          await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id, optMsg.message_id])) });
           return;
         }
         if (args[0].toLowerCase() === "unequal" || args[0].toLowerCase() === "itemized") {
@@ -601,7 +619,12 @@ export default {
             `Reply to this message with the amount you are transferring (e.g. <code>50000</code> or <code>10000/2</code>):\n\n<span class="tg-spoiler">[Action: pay_step1_${draftId}]</span>`,
             { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, input_field_placeholder: "Transfer Amount (e.g. 50000)" } }
           );
-          await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id])) });
+          const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+          const optMsg = await ctx.reply(
+            `<i>Tap below to cancel:</i>\n<span class="tg-spoiler">[Action: pay_step1_${draftId}]</span>`,
+            { parse_mode: "HTML", reply_markup: kb }
+          );
+          await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id, optMsg.message_id])) });
           return;
         }
         await processPay(ctx, args, cmdMsgId ? [cmdMsgId] : []);
@@ -725,6 +748,12 @@ export default {
           if (!draft) return ctx.reply("❌ Session expired. Please run /new again.");
 
           const text = ctx.message.text.trim();
+          if (text.toLowerCase() === "cancel" || text.toLowerCase() === "/cancel") {
+            await deleteDraft(env.DB, draftId);
+            const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
+            if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
+            return ctx.reply("❌ Project creation cancelled.");
+          }
           if (!text) return ctx.reply("❌ Please provide a valid project name.");
 
           draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
@@ -746,14 +775,21 @@ export default {
           await saveDraft(env.DB, draftId, draft);
 
           const prompt2 = await ctx.reply(
-            `Project: <b>${escapeHtml(draft.name)}</b>\n\nReply to this message with a <b>Currency</b> (e.g. <code>$</code>, <code>€</code>, <code>Toman</code>), or send <code>-</code> to skip:\n\n<span class="tg-spoiler">[Action: new_step2_${draftId}]</span>`,
+            `Project: <b>${escapeHtml(draft.name)}</b>\n\nReply to this message with a <b>Currency</b> (e.g. <code>$</code>, <code>€</code>, <code>Toman</code>), or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: new_step2_${draftId}]</span>`,
             {
               parse_mode: "HTML",
               reply_parameters: { message_id: ctx.message.message_id },
-              reply_markup: { force_reply: true, input_field_placeholder: "Currency or send - to skip" }
+              reply_markup: { force_reply: true, input_field_placeholder: "Currency or tap Skip" }
             }
           );
-          draft.msgIds.push(prompt2.message_id);
+          const kb2 = new InlineKeyboard()
+            .text("⏩ Skip", `new_skip_curr_${draftId}`)
+            .text("❌ Cancel", `canceldraft_${draftId}`);
+          const opt2 = await ctx.reply(
+            `<i>Quick actions:</i>\n<span class="tg-spoiler">[Action: new_step2_${draftId}]</span>`,
+            { parse_mode: "HTML", reply_markup: kb2 }
+          );
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), prompt2.message_id, opt2.message_id]));
           await saveDraft(env.DB, draftId, draft);
           return;
         }
@@ -766,6 +802,12 @@ export default {
           if (!draft) return ctx.reply("❌ Session expired. Please run /new again.");
 
           let currency = ctx.message.text.trim();
+          if (currency.toLowerCase() === "cancel" || currency.toLowerCase() === "/cancel") {
+            await deleteDraft(env.DB, draftId);
+            const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
+            if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
+            return ctx.reply("❌ Project creation cancelled.");
+          }
           if (currency === "-" || currency.toLowerCase() === "skip" || currency.toLowerCase() === "none" || currency === ".") {
             currency = "";
           }
@@ -782,6 +824,12 @@ export default {
           if (!draft) return ctx.reply("❌ Session expired. Please run /add again.");
 
           const raw = ctx.message.text.trim();
+          if (raw.toLowerCase() === "cancel" || raw.toLowerCase() === "/cancel") {
+            await deleteDraft(env.DB, draftId);
+            const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
+            if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
+            return ctx.reply("❌ Expense cancelled.");
+          }
           if (raw.toLowerCase() === "unequal" || raw.toLowerCase() === "itemized" || raw === "-" || raw.toLowerCase() === "skip") {
             draft.isItemized = true;
             draft.amount = 0;
@@ -820,6 +868,12 @@ export default {
           if (!draft) return ctx.reply("❌ Session expired. Please run /add again.");
 
           let desc = ctx.message.text.trim();
+          if (desc.toLowerCase() === "cancel" || desc.toLowerCase() === "/cancel") {
+            await deleteDraft(env.DB, draftId);
+            const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
+            if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
+            return ctx.reply("❌ Expense cancelled.");
+          }
           if (!desc || desc === "-" || desc.toLowerCase() === "skip" || desc.toLowerCase() === "none" || desc === ".") {
             desc = new Date().toISOString().replace('T', ' ').substring(0, 16);
           }
@@ -838,6 +892,12 @@ export default {
           if (!draft) return ctx.reply("❌ Session expired. Please run /pay again.");
 
           const raw = ctx.message.text.trim();
+          if (raw.toLowerCase() === "cancel" || raw.toLowerCase() === "/cancel") {
+            await deleteDraft(env.DB, draftId);
+            const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
+            if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
+            return ctx.reply("❌ Payment cancelled.");
+          }
           const { mathExpr } = parseMathInput(raw);
           if (!mathExpr) return ctx.reply("❌ Missing payment amount. Please reply with an amount (e.g. <code>50000</code> or <code>10000/2</code>):", { parse_mode: "HTML" });
           const evaluated = safeEval(mathExpr);
@@ -910,7 +970,12 @@ export default {
                 reply_markup: { force_reply: true, input_field_placeholder: `Share for ${curName.slice(0, 30)}` }
               }
             );
-            draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id, errPrompt.message_id]));
+            const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+            const errOpt = await ctx.reply(
+              `<i>Tap below to cancel:</i>\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
+              { parse_mode: "HTML", reply_markup: kb }
+            );
+            draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id, errPrompt.message_id, errOpt.message_id]));
             await saveDraft(env.DB, draftId, draft);
             return;
           }
@@ -933,14 +998,19 @@ export default {
               const curName = curMember?.name || "this person";
               const rem = Math.max(0, remaining);
               const errPrompt = await ctx.reply(
-                `⚠️ <b>Amount exceeds remaining balance!</b>\n\nYou entered <b>${roundedAmt}</b>, but only <b>${rem}</b> is remaining (Total: <b>${draft.amount}</b>).\n\nPlease reply with an amount up to <b>${rem}</b> (or send <code>${rem}</code> to balance):`,
+                `⚠️ <b>Amount exceeds remaining balance!</b>\n\nYou entered <b>${roundedAmt}</b>, but only <b>${rem}</b> is remaining (Total: <b>${draft.amount}</b>).\n\nPlease reply with an amount up to <b>${rem}</b> (or send <code>${rem}</code> to balance):\n\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
                 {
                   parse_mode: "HTML",
                   reply_parameters: { message_id: ctx.message.message_id },
                   reply_markup: { force_reply: true, input_field_placeholder: `${rem}` }
                 }
               );
-              draft.msgIds = Array.from(new Set([...(draft.msgIds || []), ctx.message.message_id, errPrompt.message_id]));
+              const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+              const errOpt = await ctx.reply(
+                `<i>Tap below to cancel:</i>\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
+                { parse_mode: "HTML", reply_markup: kb }
+              );
+              draft.msgIds = Array.from(new Set([...(draft.msgIds || []), ctx.message.message_id, errPrompt.message_id, errOpt.message_id]));
               await saveDraft(env.DB, draftId, draft);
               return;
             }
@@ -1054,7 +1124,9 @@ export default {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
-        await createProjectAndFinish(ctx, draft.name, "", draftId, draft.msgIds || []);
+        const currentMsgId = ctx.callbackQuery?.message?.message_id;
+        const allMsgIds = Array.from(new Set([...(draft.msgIds || []), ...(currentMsgId ? [currentMsgId] : [])])).filter((id): id is number => typeof id === "number" && id > 0);
+        await createProjectAndFinish(ctx, draft.name, "", draftId, allMsgIds);
       });
 
       bot.callbackQuery(/^add_skip_desc_([a-zA-Z0-9_]+)$/, async (ctx) => {
@@ -1062,6 +1134,10 @@ export default {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        const currentMsgId = ctx.callbackQuery?.message?.message_id;
+        if (currentMsgId) {
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), currentMsgId]));
+        }
         draft.desc = new Date().toISOString().replace('T', ' ').substring(0, 16);
         draft.step = "payer";
         await saveDraft(env.DB, draftId, draft);
@@ -1077,6 +1153,10 @@ export default {
         draft.isItemized = true;
         draft.amount = 0;
         draft.step = "desc";
+        const currentMsgId = ctx.callbackQuery?.message?.message_id;
+        if (currentMsgId) {
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), currentMsgId]));
+        }
         await saveDraft(env.DB, draftId, draft);
 
         try {
@@ -1305,7 +1385,12 @@ export default {
             input_field_placeholder: placeholder
           }
         });
-        draft.msgIds = Array.from(new Set([...(draft.msgIds || []), promptMsg.message_id]));
+        const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+        const optMsg = await ctx.reply(
+          `<i>Tap below to cancel:</i>\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
+          { parse_mode: "HTML", reply_markup: kb }
+        );
+        draft.msgIds = Array.from(new Set([...(draft.msgIds || []), promptMsg.message_id, optMsg.message_id]));
         await saveDraft(db, draftId, draft);
       }
 
