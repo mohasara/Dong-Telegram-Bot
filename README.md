@@ -21,6 +21,7 @@
 [![Persian & English](https://img.shields.io/badge/Language-English_%26_فارسی-informational?style=flat-square)](https://t.me/DongShareBot)
 [![Zero Setup](https://img.shields.io/badge/Setup-Zero_Install-blueviolet?style=flat-square)](https://t.me/DongShareBot?startgroup=true)
 [![Cloudflare Workers](https://img.shields.io/badge/Powered_by-Cloudflare_Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
+[![License: AGPL v3](https://img.shields.io/badge/License-GNU_AGPLv3-blue.svg?style=flat-square)](LICENSE)
 
 </div>
 
@@ -140,6 +141,12 @@ Add it to your group in 5 seconds — you'll never split expenses manually again
 8. Sync commands: `curl https://<worker-domain>.workers.dev/setcommands`
 
 </details>
+
+---
+
+## 📄 License
+
+This project is licensed under the **GNU Affero General Public License v3.0 (GNU AGPLv3)** — see the [LICENSE](LICENSE) file for full details.
 
 <br/>
 
