@@ -352,7 +352,6 @@ export default {
           reply_parameters: replyToId ? { message_id: replyToId } : undefined,
           reply_markup: {
             force_reply: true,
-            selective: true,
             input_field_placeholder: "Description or send - to skip"
           }
         });
@@ -544,7 +543,7 @@ export default {
           const draftId = `new_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
           const promptMsg = await ctx.reply(
             `Reply to this message with your <b>Project Name</b> (e.g. <code>Party</code> or <code>Trip to Paris</code>):\n\n<span class="tg-spoiler">[Action: new_step1_${draftId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, input_field_placeholder: "Project Name (e.g. Party)" } }
           );
           await saveDraft(env.DB, draftId, { step: "name", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id])) });
           return;
@@ -562,11 +561,19 @@ export default {
           const kb = new InlineKeyboard()
             .text("⚡ Unequal Share", `add_itemized_${draftId}`)
             .text("❌ Cancel", `canceldraft_${draftId}`);
-          const promptMsg = await ctx.reply(
-            `Reply to this message with the <b>Expense Amount</b> (e.g. <code>50000</code> or <code>2000+3000</code>):\n\n<i>Or tap <b>⚡ Unequal Share</b> below if you don't know the total:</i>\n\n<span class="tg-spoiler">[Action: add_step1_${draftId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: kb }
+          const optMsg = await ctx.reply(
+            `<i>Don't know the total amount? Tap below:</i>`,
+            { parse_mode: "HTML", reply_markup: kb }
           );
-          await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id])) });
+          const promptMsg = await ctx.reply(
+            `Reply to this message with the <b>Expense Amount</b> (e.g. <code>50000</code> or <code>2000+3000</code>):\n\n<span class="tg-spoiler">[Action: add_step1_${draftId}]</span>`,
+            {
+              parse_mode: "HTML",
+              reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined,
+              reply_markup: { force_reply: true, input_field_placeholder: "Expense Amount (e.g. 50000)" }
+            }
+          );
+          await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), optMsg.message_id, promptMsg.message_id])) });
           return;
         }
         if (args[0].toLowerCase() === "unequal" || args[0].toLowerCase() === "itemized") {
@@ -592,7 +599,7 @@ export default {
           const draftId = `pay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
           const promptMsg = await ctx.reply(
             `Reply to this message with the amount you are transferring (e.g. <code>50000</code> or <code>10000/2</code>):\n\n<span class="tg-spoiler">[Action: pay_step1_${draftId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, input_field_placeholder: "Transfer Amount (e.g. 50000)" } }
           );
           await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id])) });
           return;
@@ -743,7 +750,7 @@ export default {
             {
               parse_mode: "HTML",
               reply_parameters: { message_id: ctx.message.message_id },
-              reply_markup: { force_reply: true, selective: true, input_field_placeholder: "Currency or send - to skip" }
+              reply_markup: { force_reply: true, input_field_placeholder: "Currency or send - to skip" }
             }
           );
           draft.msgIds.push(prompt2.message_id);
@@ -775,6 +782,14 @@ export default {
           if (!draft) return ctx.reply("❌ Session expired. Please run /add again.");
 
           const raw = ctx.message.text.trim();
+          if (raw.toLowerCase() === "unequal" || raw.toLowerCase() === "itemized" || raw === "-" || raw.toLowerCase() === "skip") {
+            draft.isItemized = true;
+            draft.amount = 0;
+            draft.step = "desc";
+            draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
+            await saveDraft(env.DB, draftId, draft);
+            return promptAddDescription(ctx, env.DB, draftId, draft);
+          }
           const { mathExpr, desc: parsedDesc } = parseMathInput(raw);
           if (!mathExpr) return ctx.reply("❌ Missing expense amount. Please reply with an amount (e.g. <code>50000</code> or <code>2000+3000</code>):", { parse_mode: "HTML" });
           const evaluated = safeEval(mathExpr);
@@ -892,7 +907,7 @@ export default {
               {
                 parse_mode: "HTML",
                 reply_parameters: { message_id: ctx.message.message_id },
-                reply_markup: { force_reply: true, selective: true, input_field_placeholder: `Share for ${curName.slice(0, 30)}` }
+                reply_markup: { force_reply: true, input_field_placeholder: `Share for ${curName.slice(0, 30)}` }
               }
             );
             draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id, errPrompt.message_id]));
@@ -1241,7 +1256,6 @@ export default {
           reply_parameters: replyToId ? { message_id: replyToId } : undefined,
           reply_markup: {
             force_reply: true,
-            selective: true,
             input_field_placeholder: placeholder
           }
         });
