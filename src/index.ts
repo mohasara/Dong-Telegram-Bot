@@ -12,9 +12,7 @@ export const GROUP_COMMANDS = [
   { command: "transaction", description: "View details and delete transactions" },
   { command: "balances", description: "View member balances & breakdown" },
   { command: "settle", description: "Optimal settlement plan (who pays whom)" },
-  { command: "report", description: "Full group spending report" },
-  { command: "projects", description: "List all active and closed projects" },
-  { command: "close", description: "Close & archive a settled project" },
+  { command: "projects", description: "Projects, reports & close/delete projects" },
   { command: "help", description: "How to use Dong Bot" },
 ];
 
@@ -499,7 +497,7 @@ export default {
           `5. Check balances anytime with <code>/balances</code> or <code>/settle</code>.\n` +
           `6. View and manage transactions with <code>/transaction</code>.\n` +
           `7. Record repayments with <code>/pay 1000</code>.\n` +
-          `8. When all debts are zero, close the project with <code>/close</code>.\n\n` +
+          `8. View reports and close/delete projects via <code>/projects</code>.\n\n` +
           `<i>In this private chat, you can tap the buttons below anytime to check your balances and projects!</i>`;
         await ctx.reply(msg, { parse_mode: "HTML", reply_markup: pvKeyboard });
       };
@@ -565,9 +563,7 @@ export default {
           `• <code>/transaction</code> — View details and delete transactions\n` +
           `• <code>/balances</code> — View member balances and breakdown\n` +
           `• <code>/settle</code> — Get optimal debt settlement plan\n` +
-          `• <code>/report</code> — View full group spending report\n` +
-          `• <code>/projects</code> — List all active and closed projects\n` +
-          `• <code>/close</code> — Close and archive a settled project\n` +
+          `• <code>/projects</code> — View projects, reports, close & delete\n` +
           `• <code>/mybalance</code> — Check your balances in private chat\n`;
         const kb = new InlineKeyboard().text("❌ Close", "closemsg");
         await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
@@ -687,14 +683,7 @@ export default {
         if (projectId) await showSettlement(ctx, env.DB, projectId, cmdMsgId);
       });
 
-      bot.command("report", async (ctx) => {
-        if (!ctx.chat) return;
-        const cmdMsgId = ctx.message?.message_id || 0;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "report", "", cmdMsgId);
-        if (projectId) await showReport(ctx, env.DB, projectId, cmdMsgId);
-      });
-
-      bot.command("projects", async (ctx) => {
+      bot.command(["projects", "report"], async (ctx) => {
         if (!ctx.chat) return;
         const projects = await getAllProjects(env.DB, ctx.chat.id);
         if (projects.length === 0) return ctx.reply("No projects found for this group.");
@@ -707,22 +696,11 @@ export default {
           kb.text(`${statusIcon} ${p.name}${p.currency ? ' (' + p.currency + ')' : ''}`, data).row();
         }
         kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-        await ctx.reply("📜 <b>All Projects:</b>\nSelect any project to view its full report:", { parse_mode: "HTML", reply_markup: kb });
+        await ctx.reply("📜 <b>Projects & Reports:</b>\nSelect any project to view its report, close, or delete it:", { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.command("close", async (ctx) => {
-        if (!ctx.chat) return;
-        const active = await getActiveProjects(env.DB, ctx.chat.id);
-        if (active.length === 0) return ctx.reply("No active projects to close.");
-
-        const cmdMsgId = ctx.message?.message_id || 0;
-        const kb = new InlineKeyboard();
-        for (const p of active) {
-          const data = cmdMsgId ? `closeproj_${p.id}_${cmdMsgId}` : `closeproj_${p.id}`;
-          kb.text(`Close: ${p.name}`, data).row();
-        }
-        kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-        await ctx.reply("⚠️ <b>Select a project to close:</b>\n(Note: All balances must be settled first)", { parse_mode: "HTML", reply_markup: kb });
+        await ctx.reply("💡 The <code>/close</code> command has been moved into <code>/projects</code>. Tap an open project in <code>/projects</code> to close it.", { parse_mode: "HTML" });
       });
 
       // ====================================================
@@ -2131,7 +2109,10 @@ export default {
           kb.text("🗑️ Delete Project", askDelData).row();
         } else {
           const balData = cmdMsgId ? `selproj_bal_${projId}_${cmdMsgId}` : `selproj_bal_${projId}`;
-          kb.text("👥 View Members", balData).row();
+          const closeData = cmdMsgId ? `closeproj_${projId}_${cmdMsgId}` : `closeproj_${projId}`;
+          kb.text("👥 View Members", balData)
+            .text("🔒 Close Project", closeData)
+            .row();
         }
         kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         if (ctx.callbackQuery) await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
@@ -2147,7 +2128,9 @@ export default {
         if (!proj) return;
 
         const cfmData = cmdMsgId ? `cfmdel_proj_${projId}_${cmdMsgId}` : `cfmdel_proj_${projId}`;
-        const cancelData = cmdMsgId ? `selproj_report_${projId}_${cmdMsgId}` : `selproj_report_${projId}`;
+        const cancelData = ctx.chat?.type === "private"
+          ? `pv_proj_${projId}`
+          : (cmdMsgId ? `selproj_report_${projId}_${cmdMsgId}` : `selproj_report_${projId}`);
 
         const confirmText =
           `⚠️ <b>Delete Project?</b>\n\n` +
@@ -2191,25 +2174,28 @@ export default {
         if (!proj) return;
         const { netBalances } = await calculateBalances(env.DB, projId);
 
+        const backData = ctx.chat?.type === "private"
+          ? `pv_proj_${projId}`
+          : (cmdMsgId ? `selproj_report_${projId}_${cmdMsgId}` : `selproj_report_${projId}`);
+
         const unsettled = Object.values(netBalances).some(b => Math.abs(b) > 0.01);
         if (unsettled) {
-          const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-          await ctx.editMessageText(
+          const kb = new InlineKeyboard()
+            .text("« Back to Project", backData)
+            .row()
+            .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          return ctx.editMessageText(
             `❌ <b>Cannot close ${escapeHtml(proj.name)}!</b>\n\nThere are still unsettled debts. Run /settle to see who needs to pay whom, and log payments with /pay.`,
             { parse_mode: "HTML", reply_markup: kb }
           );
-          if (ctx.chat && cmdMsgId) {
-            await deleteMessages(ctx, ctx.chat.id, [cmdMsgId]);
-          }
-          return;
         }
 
         await env.DB.prepare("UPDATE projects SET status = 'ended' WHERE id = ?").bind(projId).run();
-        const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        const kb = new InlineKeyboard()
+          .text("« Back to Project", backData)
+          .row()
+          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         await ctx.editMessageText(`🔒 <b>Project ${escapeHtml(proj.name)} is now officially closed and archived.</b>`, { parse_mode: "HTML", reply_markup: kb });
-        if (ctx.chat && cmdMsgId) {
-          await deleteMessages(ctx, ctx.chat.id, [cmdMsgId]);
-        }
       });
 
       // --- PRIVATE CHAT (PV) NAVIGATION CALLBACKS ---
@@ -2247,6 +2233,8 @@ export default {
           .text("🧾 View Transactions", `selproj_tx_${projId}`).row();
         if (proj.status === "ended") {
           kb.text("🗑️ Delete Project", `askdel_proj_${projId}_0`).row();
+        } else {
+          kb.text("🔒 Close Project", `closeproj_${projId}_0`).row();
         }
         kb.text("« My Balances", "pv_back_bal")
           .text("« My Projects", "pv_back_proj");
