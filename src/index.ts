@@ -917,10 +917,57 @@ export default {
 
           const roundedAmt = Math.round(amt * 100) / 100;
           const currentUserId = draft.splitOrder[draft.currentShareIndex];
+
+          // If fixed total is known, validate user didn't exceed remaining
+          if (!draft.isItemized && draft.amount > 0) {
+            let allocatedSoFar = 0;
+            for (let i = 0; i < draft.currentShareIndex; i++) {
+              allocatedSoFar += (draft.shares?.[draft.splitOrder[i]] || 0);
+            }
+            allocatedSoFar = Math.round(allocatedSoFar * 100) / 100;
+            const remaining = Math.round((draft.amount - allocatedSoFar) * 100) / 100;
+
+            if (roundedAmt > remaining + 0.01) {
+              const members = await getProjectMembers(env.DB, draft.projectId);
+              const curMember = members.find(m => m.user_id === currentUserId);
+              const curName = curMember?.name || "this person";
+              const rem = Math.max(0, remaining);
+              const errPrompt = await ctx.reply(
+                `⚠️ <b>Amount exceeds remaining balance!</b>\n\nYou entered <b>${roundedAmt}</b>, but only <b>${rem}</b> is remaining (Total: <b>${draft.amount}</b>).\n\nPlease reply with an amount up to <b>${rem}</b> (or send <code>${rem}</code> to balance):`,
+                {
+                  parse_mode: "HTML",
+                  reply_parameters: { message_id: ctx.message.message_id },
+                  reply_markup: { force_reply: true, input_field_placeholder: `${rem}` }
+                }
+              );
+              draft.msgIds = Array.from(new Set([...(draft.msgIds || []), ctx.message.message_id, errPrompt.message_id]));
+              await saveDraft(env.DB, draftId, draft);
+              return;
+            }
+          }
+
           if (!draft.shares) draft.shares = {};
           draft.shares[currentUserId] = roundedAmt;
           draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
           draft.currentShareIndex = (draft.currentShareIndex || 0) + 1;
+
+          // Check if fixed total has been completely reached early
+          if (!draft.isItemized && draft.amount > 0) {
+            let totalAllocated = 0;
+            for (let i = 0; i < draft.currentShareIndex; i++) {
+              totalAllocated += (draft.shares[draft.splitOrder[i]] || 0);
+            }
+            totalAllocated = Math.round(totalAllocated * 100) / 100;
+
+            if (Math.abs(totalAllocated - draft.amount) <= 0.01) {
+              // Automatically set all remaining members' shares to 0
+              for (let k = draft.currentShareIndex; k < draft.splitOrder.length; k++) {
+                const remUid = draft.splitOrder[k];
+                draft.shares[remUid] = 0;
+              }
+              draft.currentShareIndex = draft.splitOrder.length;
+            }
+          }
 
           if (draft.currentShareIndex < draft.splitOrder.length) {
             await saveDraft(env.DB, draftId, draft);
@@ -1160,10 +1207,9 @@ export default {
         await deleteDraft(env.DB, draftId);
         const currentMsgId = ctx.callbackQuery?.message?.message_id;
         const toDelete = (draft.msgIds || []).filter((id: any): id is number => typeof id === "number" && id > 0 && id !== currentMsgId);
-        const idsPayload = toDelete.join("_");
         const kb = new InlineKeyboard()
           .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
-          .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
+          .text("❌ Close", "closemsg");
         await ctx.editMessageText(`✅ <b>Expense Saved!</b>\n🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n\n<i>Split equally between ${draft.splitWith.length} people.</i>`, { parse_mode: "HTML", reply_markup: kb });
 
         // Delete previous messages of this flow after showing the last message
@@ -1270,9 +1316,10 @@ export default {
         draft: any,
         userShares: { userId: number; amount: number; name: string }[]
       ) {
+        const desc = draft.desc || new Date().toISOString().replace('T', ' ').substring(0, 16);
         const exp = await db.prepare(
           "INSERT INTO expenses (project_id, payer_id, amount, description) VALUES (?, ?, ?, ?) RETURNING id"
-        ).bind(draft.projectId, draft.payerId, draft.amount, draft.desc).first() as any;
+        ).bind(draft.projectId, draft.payerId, draft.amount, desc).first() as any;
 
         for (const s of userShares) {
           await db.prepare(
@@ -1280,22 +1327,21 @@ export default {
           ).bind(exp.id, s.userId, s.amount).run();
         }
 
+        const kb = new InlineKeyboard()
+          .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
+          .text("❌ Close", "closemsg");
+
+        let reportMsg = `✅ <b>Unequal Expense Saved!</b>\n🧾 <b>${escapeHtml(desc)}</b> (${draft.amount})\n\n`;
+        userShares.forEach(s => reportMsg += `• ${escapeHtml(s.name)}: ${s.amount}\n`);
+
+        await ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
         await deleteDraft(db, draftId);
+
         const allIds = Array.from(new Set([
           ...(draft.msgIds || []),
           ctx.message?.message_id,
           ctx.callbackQuery?.message?.message_id
         ])).filter((id): id is number => typeof id === "number" && id > 0);
-
-        const idsPayload = allIds.join("_");
-        const kb = new InlineKeyboard()
-          .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
-          .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
-
-        let reportMsg = `✅ <b>Unequal Expense Saved!</b>\n🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n\n`;
-        userShares.forEach(s => reportMsg += `• ${escapeHtml(s.name)}: ${s.amount}\n`);
-
-        await ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
 
         if (ctx.chat && allIds.length > 0) {
           await deleteMessages(ctx, ctx.chat.id, allIds);
@@ -1386,10 +1432,9 @@ export default {
         await deleteDraft(env.DB, draftId);
         const currentMsgId = ctx.callbackQuery?.message?.message_id;
         const toDelete = (draft.msgIds || []).filter((id: any): id is number => typeof id === "number" && id > 0 && id !== currentMsgId);
-        const idsPayload = toDelete.join("_");
         const kb = new InlineKeyboard()
           .text("↩️ Undo", `delpay_${t.id}_${draft.projectId}`)
-          .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
+          .text("❌ Close", "closemsg");
         await ctx.editMessageText(`✅ <b>Payment Recorded!</b>\nAmount: ${draft.amount}`, { parse_mode: "HTML", reply_markup: kb });
 
         // Delete original command and prompts at the end of the payment flow
