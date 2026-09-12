@@ -9,11 +9,11 @@ export const GROUP_COMMANDS = [
   { command: "new", description: "Create a new project" },
   { command: "add", description: "Record an expense (supports math: 5000+2000 Taxi)" },
   { command: "pay", description: "Record a repayment transfer" },
+  { command: "transaction", description: "View details and delete transactions" },
   { command: "balances", description: "View member balances & breakdown" },
   { command: "settle", description: "Optimal settlement plan (who pays whom)" },
   { command: "report", description: "Full group spending report" },
   { command: "projects", description: "List all active and closed projects" },
-  { command: "delete", description: "Recent ledger & delete entries" },
   { command: "close", description: "Close & archive a settled project" },
   { command: "help", description: "How to use Dong Bot" },
 ];
@@ -465,6 +465,29 @@ export default {
         await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
       };
 
+      const showPrivateTransactions = async (ctx: Context) => {
+        if (!ctx.from) return;
+        const userId = ctx.from.id;
+        const { results: memberships } = await env.DB.prepare(
+          "SELECT p.id, p.name, p.currency FROM project_members pm JOIN projects p ON pm.project_id = p.id WHERE pm.user_id = ? AND p.status = 'active'"
+        ).bind(userId).all();
+
+        if (!memberships || memberships.length === 0) {
+          return ctx.reply("You are not part of any active projects yet.", { reply_markup: pvKeyboard });
+        }
+
+        if (memberships.length === 1) {
+          return showTransactionsMenu(ctx, env.DB, (memberships[0] as any).id, 1, 0);
+        }
+
+        let msg = `📁 <b>Select a project to view its transactions:</b>\n`;
+        const kb = new InlineKeyboard();
+        for (const proj of (memberships as any[])) {
+          kb.text(`🧾 ${proj.name}${proj.currency ? ' (' + proj.currency + ')' : ''}`, `selproj_tx_${proj.id}`).row();
+        }
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
+      };
+
       const showPrivateHelp = async (ctx: Context) => {
         const msg = 
           `👋 <b>Dong Split Bot Guide</b>\n\n` +
@@ -474,8 +497,9 @@ export default {
           `3. Group members tap <b>Join Project</b>.\n` +
           `4. Log expenses with <code>/add 5000 Taxi</code> (supports math: <code>2000+3000</code>).\n` +
           `5. Check balances anytime with <code>/balances</code> or <code>/settle</code>.\n` +
-          `6. Record repayments with <code>/pay 1000</code>.\n` +
-          `7. When all debts are zero, close the project with <code>/close</code>.\n\n` +
+          `6. View and manage transactions with <code>/transaction</code>.\n` +
+          `7. Record repayments with <code>/pay 1000</code>.\n` +
+          `8. When all debts are zero, close the project with <code>/close</code>.\n\n` +
           `<i>In this private chat, you can tap the buttons below anytime to check your balances and projects!</i>`;
         await ctx.reply(msg, { parse_mode: "HTML", reply_markup: pvKeyboard });
       };
@@ -488,6 +512,10 @@ export default {
         if (ctx.chat?.type === "private") await showPrivateProjects(ctx);
       });
 
+      bot.hears("🧾 Transactions", async (ctx) => {
+        if (ctx.chat?.type === "private") await showPrivateTransactions(ctx);
+      });
+
       bot.hears("❓ Help & Guide", async (ctx) => {
         if (ctx.chat?.type === "private") await showPrivateHelp(ctx);
       });
@@ -498,6 +526,10 @@ export default {
 
       bot.hears(/^(projects|پروژه.*)$/i, async (ctx) => {
         if (ctx.chat?.type === "private") await showPrivateProjects(ctx);
+      });
+
+      bot.hears(/^(transactions?|tx|تراکنش.*)$/i, async (ctx) => {
+        if (ctx.chat?.type === "private") await showPrivateTransactions(ctx);
       });
 
       bot.hears(/^(help|راهنما)$/i, async (ctx) => {
@@ -530,11 +562,11 @@ export default {
           `• <code>/new &lt;Name&gt; [Currency]</code> — Create a new project\n` +
           `• <code>/add [amount] [desc]</code> — Record a new expense (supports math: <code>5000+2000 Taxi</code>)\n` +
           `• <code>/pay [amount]</code> — Record a transfer (supports math: <code>10000/2</code>)\n` +
+          `• <code>/transaction</code> — View details and delete transactions\n` +
           `• <code>/balances</code> — View member balances and breakdown\n` +
           `• <code>/settle</code> — Get optimal debt settlement plan\n` +
           `• <code>/report</code> — View full group spending report\n` +
           `• <code>/projects</code> — List all active and closed projects\n` +
-          `• <code>/delete</code> — View recent ledger and delete entries\n` +
           `• <code>/close</code> — Close and archive a settled project\n` +
           `• <code>/mybalance</code> — Check your balances in private chat\n`;
         const kb = new InlineKeyboard().text("❌ Close", "closemsg");
@@ -630,6 +662,13 @@ export default {
         await processPay(ctx, args, cmdMsgId ? [cmdMsgId] : []);
       });
 
+      bot.command(["transaction", "transactions", "tx", "trans", "delete"], async (ctx) => {
+        if (!ctx.chat) return;
+        const cmdMsgId = ctx.message?.message_id || 0;
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "tx", "", cmdMsgId);
+        if (projectId) await showTransactionsMenu(ctx, env.DB, projectId, 1, cmdMsgId);
+      });
+
       bot.command("balances", async (ctx) => {
         if (!ctx.chat) return;
         const cmdMsgId = ctx.message?.message_id || 0;
@@ -642,13 +681,6 @@ export default {
         const cmdMsgId = ctx.message?.message_id || 0;
         const { projectId } = await routeProjectCommand(ctx, env.DB, "settle", "", cmdMsgId);
         if (projectId) await showSettlement(ctx, env.DB, projectId, cmdMsgId);
-      });
-
-      bot.command("delete", async (ctx) => {
-        if (!ctx.chat) return;
-        const cmdMsgId = ctx.message?.message_id || 0;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "delete", "", cmdMsgId);
-        if (projectId) await showLedger(ctx, env.DB, projectId, cmdMsgId);
       });
 
       bot.command("report", async (ctx) => {
@@ -1636,25 +1668,343 @@ export default {
         else await ctx.reply(report, { parse_mode: "HTML", reply_markup: kb });
       }
 
+      // --- TRANSACTIONS HANDLERS ---
+      bot.callbackQuery(/^selproj_tx_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
+        await showTransactionsMenu(ctx, env.DB, Number(ctx.match[1]), 1, cmdMsgId);
+      });
+
       bot.callbackQuery(/^selproj_delete_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
-        await showLedger(ctx, env.DB, Number(ctx.match[1]), cmdMsgId);
+        await showTransactionsMenu(ctx, env.DB, Number(ctx.match[1]), 1, cmdMsgId);
       });
 
-      async function showLedger(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0) {
+      bot.callbackQuery(/^txpage_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const projId = Number(ctx.match[1]);
+        const page = Number(ctx.match[2]);
+        const cmdMsgId = ctx.match[3] ? Number(ctx.match[3]) : 0;
+        await showTransactionsMenu(ctx, env.DB, projId, page, cmdMsgId);
+      });
+
+      bot.callbackQuery(/^tx_noop$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+      });
+
+      async function showTransactionsMenu(ctx: Context, db: D1Database, projId: number, page: number = 1, cmdMsgId: number = 0) {
         const proj = await getProjectById(db, projId);
         if (!proj) return;
-        const { results: exps } = await db.prepare("SELECT * FROM expenses WHERE project_id = ? ORDER BY id DESC LIMIT 5").bind(projId).all();
-        const { results: pays } = await db.prepare("SELECT * FROM settlements WHERE project_id = ? ORDER BY id DESC LIMIT 5").bind(projId).all();
+        const members = await getProjectMembers(db, projId);
+        const memberMap = new Map<number, string>(members.map(m => [m.user_id, m.name]));
+
+        const { results: exps } = await db.prepare(
+          "SELECT id, payer_id, amount, description, created_at FROM expenses WHERE project_id = ? ORDER BY id DESC"
+        ).bind(projId).all();
+
+        const { results: pays } = await db.prepare(
+          "SELECT id, from_user_id, to_user_id, amount, created_at FROM settlements WHERE project_id = ? ORDER BY id DESC"
+        ).bind(projId).all();
+
+        type TxItem = {
+          type: "exp" | "pay";
+          id: number;
+          amount: number;
+          createdAt: string;
+          label: string;
+        };
+
+        const list: TxItem[] = [];
+
+        for (const e of (exps as any[])) {
+          const desc = e.description ? (e.description.length > 18 ? e.description.slice(0, 18) + "…" : e.description) : "Expense";
+          list.push({
+            type: "exp",
+            id: e.id,
+            amount: e.amount,
+            createdAt: e.created_at || "",
+            label: `🧾 ${desc} (${e.amount}${proj.currency ? ' ' + proj.currency : ''})`
+          });
+        }
+
+        for (const s of (pays as any[])) {
+          const fromName = memberMap.get(s.from_user_id) || "Unknown";
+          const toName = memberMap.get(s.to_user_id) || "Unknown";
+          const shortFrom = fromName.length > 8 ? fromName.slice(0, 8) + "…" : fromName;
+          const shortTo = toName.length > 8 ? toName.slice(0, 8) + "…" : toName;
+          list.push({
+            type: "pay",
+            id: s.id,
+            amount: s.amount,
+            createdAt: s.created_at || "",
+            label: `💸 ${shortFrom} ➔ ${shortTo} (${s.amount}${proj.currency ? ' ' + proj.currency : ''})`
+          });
+        }
+
+        // Sort newest first by created_at or id
+        list.sort((a, b) => {
+          if (a.createdAt && b.createdAt && a.createdAt !== b.createdAt) {
+            return b.createdAt.localeCompare(a.createdAt);
+          }
+          return b.id - a.id;
+        });
+
         const kb = new InlineKeyboard();
-        (exps as any[]).forEach(e => { kb.text(`❌ Exp: ${e.description} (${e.amount})`, `delexp_${e.id}_${projId}`).row(); });
-        (pays as any[]).forEach(p => { kb.text(`❌ Pay: Transfer (${p.amount})`, `delpay_${p.id}_${projId}`).row(); });
-        const text = (exps.length > 0 || pays.length > 0) ? "📖 <b>Recent Ledger:</b>\nTap the ❌ next to an item to delete it permanently." : "📖 Ledger is empty.";
+
+        if (list.length === 0) {
+          const text = `🧾 <b>Transactions for ${escapeHtml(proj.name)}:</b>\n\n<i>No transactions recorded yet in this project.</i>`;
+          kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+          else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+          return;
+        }
+
+        const PAGE_SIZE = 6;
+        const totalItems = list.length;
+        const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
+        const currentPage = Math.max(1, Math.min(page, totalPages));
+        const startIndex = (currentPage - 1) * PAGE_SIZE;
+        const pageItems = list.slice(startIndex, startIndex + PAGE_SIZE);
+
+        for (const item of pageItems) {
+          const callbackData = item.type === "exp"
+            ? (cmdMsgId ? `tx_exp_${item.id}_${projId}_${currentPage}_${cmdMsgId}` : `tx_exp_${item.id}_${projId}_${currentPage}`)
+            : (cmdMsgId ? `tx_pay_${item.id}_${projId}_${currentPage}_${cmdMsgId}` : `tx_pay_${item.id}_${projId}_${currentPage}`);
+          kb.text(item.label, callbackData).row();
+        }
+
+        if (totalPages > 1) {
+          if (currentPage > 1) {
+            const prevData = cmdMsgId
+              ? `txpage_${projId}_${currentPage - 1}_${cmdMsgId}`
+              : `txpage_${projId}_${currentPage - 1}`;
+            kb.text("⬅️ Prev", prevData);
+          }
+          kb.text(`📄 ${currentPage}/${totalPages}`, "tx_noop");
+          if (currentPage < totalPages) {
+            const nextData = cmdMsgId
+              ? `txpage_${projId}_${currentPage + 1}_${cmdMsgId}`
+              : `txpage_${projId}_${currentPage + 1}`;
+            kb.text("Next ➡️", nextData);
+          }
+          kb.row();
+        }
+
         kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+
+        const text = `🧾 <b>Transactions for ${escapeHtml(proj.name)}</b> (Page ${currentPage}/${totalPages}):\nTap any transaction to view full details (payer, shares) or delete it:`;
         if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
         else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
+
+      bot.callbackQuery(/^tx_exp_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const expId = Number(ctx.match[1]);
+        const projId = Number(ctx.match[2]);
+        const page = Number(ctx.match[3]);
+        const cmdMsgId = ctx.match[4] ? Number(ctx.match[4]) : 0;
+
+        const proj = await getProjectById(env.DB, projId);
+        if (!proj) return;
+
+        const exp = await env.DB.prepare("SELECT * FROM expenses WHERE id = ? AND project_id = ?").bind(expId, projId).first() as any;
+        const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
+
+        if (!exp) {
+          const kb = new InlineKeyboard().text("« Back to Transactions", backData).row().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          return ctx.editMessageText("❌ <i>This expense was already deleted or not found.</i>", { parse_mode: "HTML", reply_markup: kb });
+        }
+
+        const members = await getProjectMembers(env.DB, projId);
+        const payer = members.find(m => m.user_id === exp.payer_id);
+        const payerName = payer?.name || "Unknown";
+
+        const { results: splits } = await env.DB.prepare(
+          "SELECT user_id, share_amount FROM expense_splits WHERE expense_id = ?"
+        ).bind(expId).all();
+
+        let msg = `🧾 <b>Expense Details</b>\n\n`;
+        msg += `🏷️ <b>Description:</b> ${escapeHtml(exp.description)}\n`;
+        msg += `👤 <b>Paid by:</b> ${escapeHtml(payerName)}\n`;
+        msg += `💰 <b>Full Amount:</b> ${exp.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
+        if (exp.created_at) {
+          msg += `📅 <b>Date:</b> <code>${escapeHtml(exp.created_at)}</code>\n`;
+        }
+
+        msg += `\n👥 <b>Each Person's Share:</b>\n`;
+        if (!splits || splits.length === 0) {
+          msg += `<i>Equal split amongst all members.</i>\n`;
+        } else {
+          for (const s of (splits as any[])) {
+            const m = members.find(mem => mem.user_id === s.user_id);
+            const mName = m?.name || "Unknown";
+            msg += `• <b>${escapeHtml(mName)}:</b> ${s.share_amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
+          }
+        }
+
+        const askDelData = cmdMsgId ? `tx_askdel_exp_${exp.id}_${projId}_${page}_${cmdMsgId}` : `tx_askdel_exp_${exp.id}_${projId}_${page}`;
+        const kb = new InlineKeyboard()
+          .text("« Back", backData)
+          .text("🗑️ Delete", askDelData)
+          .row()
+          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+
+        await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      bot.callbackQuery(/^tx_pay_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const payId = Number(ctx.match[1]);
+        const projId = Number(ctx.match[2]);
+        const page = Number(ctx.match[3]);
+        const cmdMsgId = ctx.match[4] ? Number(ctx.match[4]) : 0;
+
+        const proj = await getProjectById(env.DB, projId);
+        if (!proj) return;
+
+        const pay = await env.DB.prepare("SELECT * FROM settlements WHERE id = ? AND project_id = ?").bind(payId, projId).first() as any;
+        const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
+
+        if (!pay) {
+          const kb = new InlineKeyboard().text("« Back to Transactions", backData).row().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          return ctx.editMessageText("❌ <i>This payment was already deleted or not found.</i>", { parse_mode: "HTML", reply_markup: kb });
+        }
+
+        const members = await getProjectMembers(env.DB, projId);
+        const sender = members.find(m => m.user_id === pay.from_user_id);
+        const receiver = members.find(m => m.user_id === pay.to_user_id);
+        const senderName = sender?.name || "Unknown";
+        const receiverName = receiver?.name || "Unknown";
+
+        let msg = `💸 <b>Transfer / Payment Details</b>\n\n`;
+        msg += `👤 <b>Sender (Payer):</b> ${escapeHtml(senderName)}\n`;
+        msg += `👉 <b>Receiver:</b> ${escapeHtml(receiverName)}\n`;
+        msg += `💰 <b>Full Amount:</b> ${pay.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
+        if (pay.created_at) {
+          msg += `📅 <b>Date:</b> <code>${escapeHtml(pay.created_at)}</code>\n`;
+        }
+
+        const askDelData = cmdMsgId ? `tx_askdel_pay_${pay.id}_${projId}_${page}_${cmdMsgId}` : `tx_askdel_pay_${pay.id}_${projId}_${page}`;
+        const kb = new InlineKeyboard()
+          .text("« Back", backData)
+          .text("🗑️ Delete", askDelData)
+          .row()
+          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+
+        await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      bot.callbackQuery(/^tx_askdel_exp_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const expId = Number(ctx.match[1]);
+        const projId = Number(ctx.match[2]);
+        const page = Number(ctx.match[3]);
+        const cmdMsgId = ctx.match[4] ? Number(ctx.match[4]) : 0;
+
+        const proj = await getProjectById(env.DB, projId);
+        if (!proj) return;
+
+        const exp = await env.DB.prepare("SELECT * FROM expenses WHERE id = ? AND project_id = ?").bind(expId, projId).first() as any;
+        const detailData = cmdMsgId ? `tx_exp_${expId}_${projId}_${page}_${cmdMsgId}` : `tx_exp_${expId}_${projId}_${page}`;
+
+        if (!exp) {
+          const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
+          const kb = new InlineKeyboard().text("« Back to Transactions", backData).row().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          return ctx.editMessageText("❌ <i>This expense was already deleted or not found.</i>", { parse_mode: "HTML", reply_markup: kb });
+        }
+
+        const cfmData = cmdMsgId ? `tx_cfmdel_exp_${expId}_${projId}_${page}_${cmdMsgId}` : `tx_cfmdel_exp_${expId}_${projId}_${page}`;
+        const kb = new InlineKeyboard()
+          .text("🗑️ Yes, Delete", cfmData)
+          .text("« Cancel", detailData)
+          .row()
+          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+
+        const confirmMsg = `⚠️ <b>Delete Expense?</b>\n\n` +
+          `Are you sure you want to permanently delete:\n` +
+          `🧾 <b>${escapeHtml(exp.description)}</b> (${exp.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''})\n\n` +
+          `<i>⚠️ This action cannot be undone. Balances will be recalculated.</i>`;
+
+        await ctx.editMessageText(confirmMsg, { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      bot.callbackQuery(/^tx_askdel_pay_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const payId = Number(ctx.match[1]);
+        const projId = Number(ctx.match[2]);
+        const page = Number(ctx.match[3]);
+        const cmdMsgId = ctx.match[4] ? Number(ctx.match[4]) : 0;
+
+        const proj = await getProjectById(env.DB, projId);
+        if (!proj) return;
+
+        const pay = await env.DB.prepare("SELECT * FROM settlements WHERE id = ? AND project_id = ?").bind(payId, projId).first() as any;
+        const detailData = cmdMsgId ? `tx_pay_${payId}_${projId}_${page}_${cmdMsgId}` : `tx_pay_${payId}_${projId}_${page}`;
+
+        if (!pay) {
+          const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
+          const kb = new InlineKeyboard().text("« Back to Transactions", backData).row().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          return ctx.editMessageText("❌ <i>This payment was already deleted or not found.</i>", { parse_mode: "HTML", reply_markup: kb });
+        }
+
+        const members = await getProjectMembers(env.DB, projId);
+        const sender = members.find(m => m.user_id === pay.from_user_id);
+        const receiver = members.find(m => m.user_id === pay.to_user_id);
+        const senderName = sender?.name || "Unknown";
+        const receiverName = receiver?.name || "Unknown";
+
+        const cfmData = cmdMsgId ? `tx_cfmdel_pay_${payId}_${projId}_${page}_${cmdMsgId}` : `tx_cfmdel_pay_${payId}_${projId}_${page}`;
+        const kb = new InlineKeyboard()
+          .text("🗑️ Yes, Delete", cfmData)
+          .text("« Cancel", detailData)
+          .row()
+          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+
+        const confirmMsg = `⚠️ <b>Delete Payment?</b>\n\n` +
+          `Are you sure you want to permanently delete:\n` +
+          `💸 <b>${escapeHtml(senderName)} ➔ ${escapeHtml(receiverName)}</b> (${pay.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''})\n\n` +
+          `<i>⚠️ This action cannot be undone. Balances will be recalculated.</i>`;
+
+        await ctx.editMessageText(confirmMsg, { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      bot.callbackQuery(/^tx_cfmdel_exp_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        await ctx.answerCallbackQuery("Transaction permanently deleted!").catch(() => {});
+        const expId = Number(ctx.match[1]);
+        const projId = Number(ctx.match[2]);
+        const page = Number(ctx.match[3]);
+        const cmdMsgId = ctx.match[4] ? Number(ctx.match[4]) : 0;
+
+        await env.DB.prepare("DELETE FROM expense_splits WHERE expense_id = ?").bind(expId).run();
+        await env.DB.prepare("DELETE FROM expenses WHERE id = ?").bind(expId).run();
+
+        const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
+        const kb = new InlineKeyboard()
+          .text("« Back to Transactions", backData)
+          .row()
+          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+
+        await ctx.editMessageText("🗑️ <i>Expense deleted permanently.</i>", { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      bot.callbackQuery(/^tx_cfmdel_pay_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        await ctx.answerCallbackQuery("Payment permanently deleted!").catch(() => {});
+        const payId = Number(ctx.match[1]);
+        const projId = Number(ctx.match[2]);
+        const page = Number(ctx.match[3]);
+        const cmdMsgId = ctx.match[4] ? Number(ctx.match[4]) : 0;
+
+        await env.DB.prepare("DELETE FROM settlements WHERE id = ?").bind(payId).run();
+
+        const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
+        const kb = new InlineKeyboard()
+          .text("« Back to Transactions", backData)
+          .row()
+          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+
+        await ctx.editMessageText("🗑️ <i>Payment deleted permanently.</i>", { parse_mode: "HTML", reply_markup: kb });
+      });
 
       bot.callbackQuery(/^selproj_report_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
@@ -1747,6 +2097,7 @@ export default {
         else msg += `⚪ <b>Net Total:</b> Settled ($0.00)`;
 
         const kb = new InlineKeyboard()
+          .text("🧾 View Transactions", `selproj_tx_${projId}`).row()
           .text("« My Balances", "pv_back_bal")
           .text("« My Projects", "pv_back_proj");
         await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
