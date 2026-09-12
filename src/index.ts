@@ -595,12 +595,13 @@ export default {
           draft.step = "currency";
           await saveDraft(env.DB, draftId, draft);
 
-          const kb = new InlineKeyboard()
-            .text("⏩ Skip", `new_skip_curr_${draftId}`)
-            .text("❌ Cancel", `canceldraft_${draftId}`);
           const prompt2 = await ctx.reply(
-            `Project Name: <b>${escapeHtml(draft.name)}</b>\n\nReply to this message with a <b>Currency</b> (e.g. <code>$</code>, <code>€</code>, <code>Toman</code>), or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: new_step2_${draftId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: { message_id: ctx.message.message_id }, reply_markup: kb }
+            `Project: <b>${escapeHtml(draft.name)}</b>\n\nReply to this message with a <b>Currency</b> (e.g. <code>$</code>, <code>€</code>, <code>Toman</code>), or send <code>-</code> to skip:\n\n<span class="tg-spoiler">[Action: new_step2_${draftId}]</span>`,
+            {
+              parse_mode: "HTML",
+              reply_parameters: { message_id: ctx.message.message_id },
+              reply_markup: { force_reply: true, selective: true, input_field_placeholder: "Currency or send - to skip" }
+            }
           );
           draft.msgIds.push(prompt2.message_id);
           await saveDraft(env.DB, draftId, draft);
@@ -615,7 +616,7 @@ export default {
           if (!draft) return ctx.reply("❌ Session expired. Please run /new again.");
 
           let currency = ctx.message.text.trim();
-          if (currency === "-" || currency.toLowerCase() === "skip" || currency.toLowerCase() === "none") {
+          if (currency === "-" || currency.toLowerCase() === "skip" || currency.toLowerCase() === "none" || currency === ".") {
             currency = "";
           }
           draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
@@ -650,12 +651,13 @@ export default {
 
           draft.step = "desc";
           await saveDraft(env.DB, draftId, draft);
-          const kb = new InlineKeyboard()
-            .text("⏩ Skip", `add_skip_desc_${draftId}`)
-            .text("❌ Cancel", `canceldraft_${draftId}`);
           const prompt2 = await ctx.reply(
-            `Amount: <b>${amount}</b>\n\nReply to this message with an optional <b>Description</b> (e.g. <code>Taxi</code>, <code>Dinner</code>), or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: { message_id: ctx.message.message_id }, reply_markup: kb }
+            `Amount: <b>${amount}</b>\n\nReply to this message with an optional <b>Description</b> (e.g. <code>Taxi</code>, <code>Dinner</code>), or send <code>-</code> to skip:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`,
+            {
+              parse_mode: "HTML",
+              reply_parameters: { message_id: ctx.message.message_id },
+              reply_markup: { force_reply: true, selective: true, input_field_placeholder: "Description or send - to skip" }
+            }
           );
           draft.msgIds.push(prompt2.message_id);
           await saveDraft(env.DB, draftId, draft);
@@ -670,7 +672,7 @@ export default {
           if (!draft) return ctx.reply("❌ Session expired. Please run /add again.");
 
           let desc = ctx.message.text.trim();
-          if (!desc || desc === "-" || desc.toLowerCase() === "skip" || desc.toLowerCase() === "none") {
+          if (!desc || desc === "-" || desc.toLowerCase() === "skip" || desc.toLowerCase() === "none" || desc === ".") {
             desc = new Date().toISOString().replace('T', ' ').substring(0, 16);
           }
           draft.desc = desc;
