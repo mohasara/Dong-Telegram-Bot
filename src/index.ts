@@ -341,6 +341,25 @@ export default {
         await createProjectAndFinish(ctx, name, currency, "", initialMsgIds);
       };
 
+      const promptAddDescription = async (ctx: Context, db: D1Database, draftId: string, draft: any) => {
+        const promptText = draft.isItemized
+          ? `⚡ <b>Unequal Expense</b> (Total will be calculated from individual shares)\n\nReply to this message with an optional <b>Description</b> (e.g. <code>Taxi</code>, <code>Dinner</code>), or send <code>-</code> to skip:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`
+          : `Amount: <b>${draft.amount}</b>\n\nReply to this message with an optional <b>Description</b> (e.g. <code>Taxi</code>, <code>Dinner</code>), or send <code>-</code> to skip:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`;
+
+        const replyToId = ctx.message?.message_id || ctx.callbackQuery?.message?.message_id;
+        const promptMsg = await ctx.reply(promptText, {
+          parse_mode: "HTML",
+          reply_parameters: replyToId ? { message_id: replyToId } : undefined,
+          reply_markup: {
+            force_reply: true,
+            selective: true,
+            input_field_placeholder: "Description or send - to skip"
+          }
+        });
+        draft.msgIds = Array.from(new Set([...(draft.msgIds || []), promptMsg.message_id]));
+        await saveDraft(db, draftId, draft);
+      };
+
       const startAddPayerFlow = async (ctx: Context, draftId: string, draft: any) => {
         const { projectId } = await routeProjectCommand(ctx, env.DB, "add", draftId);
         draft.projectId = projectId;
@@ -348,7 +367,7 @@ export default {
         draft.splitWith = [];
         await saveDraft(env.DB, draftId, draft);
         if (projectId) {
-          await promptPayerSelection(ctx, env.DB, draftId, projectId, draft.amount, draft.desc);
+          await promptPayerSelection(ctx, env.DB, draftId, projectId, draft.amount, draft.desc, draft.isItemized);
         }
       };
 
@@ -540,12 +559,26 @@ export default {
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
           const draftId = `exp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+          const kb = new InlineKeyboard()
+            .text("⚡ Unequal Share", `add_itemized_${draftId}`)
+            .text("❌ Cancel", `canceldraft_${draftId}`);
           const promptMsg = await ctx.reply(
-            `Reply to this message with the <b>Expense Amount</b> (e.g. <code>50000</code> or <code>2000+3000</code>):\n\n<span class="tg-spoiler">[Action: add_step1_${draftId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, selective: true } }
+            `Reply to this message with the <b>Expense Amount</b> (e.g. <code>50000</code> or <code>2000+3000</code>):\n\n<i>Or tap <b>⚡ Unequal Share</b> below if you don't know the total:</i>\n\n<span class="tg-spoiler">[Action: add_step1_${draftId}]</span>`,
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: kb }
           );
           await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id])) });
           return;
+        }
+        if (args[0].toLowerCase() === "unequal" || args[0].toLowerCase() === "itemized") {
+          const desc = args.slice(1).join(" ").trim();
+          const draftId = `exp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+          const draft = { isItemized: true, amount: 0, desc: desc || "", step: desc ? "payer" : "desc", msgIds: cmdMsgId ? [cmdMsgId] : [] };
+          await saveDraft(env.DB, draftId, draft);
+          if (desc) {
+            return startAddPayerFlow(ctx, draftId, draft);
+          } else {
+            return promptAddDescription(ctx, env.DB, draftId, draft);
+          }
         }
         await processAdd(ctx, args, cmdMsgId ? [cmdMsgId] : []);
       });
@@ -761,17 +794,7 @@ export default {
 
           draft.step = "desc";
           await saveDraft(env.DB, draftId, draft);
-          const prompt2 = await ctx.reply(
-            `Amount: <b>${amount}</b>\n\nReply to this message with an optional <b>Description</b> (e.g. <code>Taxi</code>, <code>Dinner</code>), or send <code>-</code> to skip:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`,
-            {
-              parse_mode: "HTML",
-              reply_parameters: { message_id: ctx.message.message_id },
-              reply_markup: { force_reply: true, selective: true, input_field_placeholder: "Description or send - to skip" }
-            }
-          );
-          draft.msgIds.push(prompt2.message_id);
-          await saveDraft(env.DB, draftId, draft);
-          return;
+          return promptAddDescription(ctx, env.DB, draftId, draft);
         }
 
         // --- Step-by-Step /add: Step 2 (Description) ---
@@ -841,57 +864,90 @@ export default {
           return next();
         }
 
-        // Catch Unequal Split Arrays
-        const draftMatch = replyTo.text.match(/\[Draft:\s*(exp_[^\]]+)\]/);
-        if (draftMatch) {
-          const draftId = draftMatch[1];
+        // --- Step-by-Step Unequal Split: Individual Shares ---
+        const splitStepMatch = replyTo.text.match(/\[Action:\s*split_step_([a-zA-Z0-9_]+)\]/);
+        if (splitStepMatch) {
+          const draftId = splitStepMatch[1];
           const draft = await getDraft(env.DB, draftId);
-          if (!draft || !draft.splitOrder) return ctx.reply("❌ This split session has expired.");
+          if (!draft || !draft.splitOrder) return ctx.reply("❌ Session expired. Please start over with /add.");
 
-          const normalizedText = ctx.message.text.trim().replace(/\s*([+\-*/()])\s*/g, '$1');
-          const entries = normalizedText.split(/[,\s]+/).filter(e => e.length > 0);
-
-          if (entries.length !== draft.splitOrder.length) {
-            return ctx.reply(`❌ I need exactly ${draft.splitOrder.length} numbers. You provided ${entries.length}.`);
+          const raw = ctx.message.text.trim();
+          if (raw.toLowerCase() === "cancel" || raw.toLowerCase() === "/cancel") {
+            await deleteDraft(env.DB, draftId);
+            const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
+            if (ctx.chat && toDelete.length > 0) {
+              await deleteMessages(ctx, ctx.chat.id, toDelete);
+            }
+            return ctx.reply("❌ Expense cancelled.");
           }
 
+          const { mathExpr } = parseMathInput(raw);
+          const amt = safeEval(mathExpr || raw);
+          if (isNaN(amt) || !isFinite(amt) || amt < 0) {
+            const members = await getProjectMembers(env.DB, draft.projectId);
+            const curMember = members.find(m => m.user_id === draft.splitOrder[draft.currentShareIndex]);
+            const curName = curMember?.name || "this person";
+            const errPrompt = await ctx.reply(
+              `❌ Invalid amount: '<code>${escapeHtml(raw)}</code>'\n\nPlease reply with a valid number or 0 for <b>${escapeHtml(curName)}</b>:\n\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
+              {
+                parse_mode: "HTML",
+                reply_parameters: { message_id: ctx.message.message_id },
+                reply_markup: { force_reply: true, selective: true, input_field_placeholder: `Share for ${curName.slice(0, 30)}` }
+              }
+            );
+            draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id, errPrompt.message_id]));
+            await saveDraft(env.DB, draftId, draft);
+            return;
+          }
+
+          const roundedAmt = Math.round(amt * 100) / 100;
+          const currentUserId = draft.splitOrder[draft.currentShareIndex];
+          if (!draft.shares) draft.shares = {};
+          draft.shares[currentUserId] = roundedAmt;
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
+          draft.currentShareIndex = (draft.currentShareIndex || 0) + 1;
+
+          if (draft.currentShareIndex < draft.splitOrder.length) {
+            await saveDraft(env.DB, draftId, draft);
+            return promptNextShare(ctx, env.DB, draftId, draft);
+          }
+
+          // All members completed!
           const members = await getProjectMembers(env.DB, draft.projectId);
           const userShares: { userId: number; amount: number; name: string }[] = [];
           let totalSum = 0;
 
-          for (let i = 0; i < entries.length; i++) {
-            const userId = draft.splitOrder[i];
-            const member = members.find(m => m.user_id === userId);
-            
-            const amt = safeEval(entries[i]);
-            if (isNaN(amt) || !isFinite(amt) || amt < 0) return ctx.reply(`❌ Invalid math: '${escapeHtml(entries[i])}'`);
-            
-            userShares.push({ userId, amount: amt, name: member?.name || "Unknown" });
-            totalSum += amt;
+          for (const uid of draft.splitOrder) {
+            const sAmt = draft.shares[uid] || 0;
+            const member = members.find(m => m.user_id === uid);
+            userShares.push({ userId: uid, amount: sAmt, name: member?.name || "Unknown" });
+            totalSum += sAmt;
+          }
+          totalSum = Math.round(totalSum * 100) / 100;
+
+          if (draft.isItemized) {
+            if (totalSum <= 0) {
+              await deleteDraft(env.DB, draftId);
+              return ctx.reply("❌ Total expense amount is 0. Expense cancelled.");
+            }
+            draft.amount = totalSum;
+          } else {
+            if (Math.abs(totalSum - draft.amount) > 0.01) {
+              await saveDraft(env.DB, draftId, draft);
+              const diff = Math.round((draft.amount - totalSum) * 100) / 100;
+              const kb = new InlineKeyboard()
+                .text(`✅ Set Total to ${totalSum}`, `exp_fixsum_${draftId}_${totalSum}`)
+                .row()
+                .text("🔄 Restart Shares", `expunequal_${draftId}`)
+                .text("❌ Cancel", `canceldraft_${draftId}`);
+              return ctx.reply(
+                `⚠️ <b>Total Mismatch!</b>\n\nYour inputs sum to <b>${totalSum}</b>, but expense total was set to <b>${draft.amount}</b> (difference: <b>${diff > 0 ? "+" : ""}${diff}</b>).\n\nTap below to use <b>${totalSum}</b> as total, or restart:`,
+                { parse_mode: "HTML", reply_markup: kb }
+              );
+            }
           }
 
-          if (Math.abs(totalSum - draft.amount) > 0.01) {
-            return ctx.reply(`❌ Total mismatch! Your inputs sum to <b>${totalSum}</b>, but the expense is <b>${draft.amount}</b>.`, { parse_mode: "HTML" });
-          }
-
-          const exp = await env.DB.prepare("INSERT INTO expenses (project_id, payer_id, amount, description) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.payerId, draft.amount, draft.desc).first() as any;
-          for (const s of userShares) await env.DB.prepare("INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)").bind(exp.id, s.userId, s.amount).run();
-          
-          await deleteDraft(env.DB, draftId);
-          const allIds = Array.from(new Set([...(draft.msgIds || []), ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
-          const idsPayload = allIds.join("_");
-          const kb = new InlineKeyboard()
-            .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
-            .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
-          let reportMsg = `✅ <b>Unequal Expense Saved!</b>\n🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n\n`;
-          userShares.forEach(s => reportMsg += `• ${escapeHtml(s.name)}: ${s.amount}\n`);
-          await ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
-
-          // ONLY delete intermediate flow messages AFTER the last message of this flow
-          if (ctx.chat && allIds.length > 0) {
-            await deleteMessages(ctx, ctx.chat.id, allIds);
-          }
-          return;
+          return finalizeUnequalExpense(ctx, env.DB, draftId, draft, userShares);
         }
 
         return next();
@@ -950,6 +1006,24 @@ export default {
         return startAddPayerFlow(ctx, draftId, draft);
       });
 
+      bot.callbackQuery(/^add_itemized_(exp_.+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[1];
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft) return ctx.reply("❌ Session expired. Please run /add again.");
+
+        draft.isItemized = true;
+        draft.amount = 0;
+        draft.step = "desc";
+        await saveDraft(env.DB, draftId, draft);
+
+        try {
+          await ctx.editMessageText("⚡ <b>Unequal Share Mode</b> (Total will be calculated from individual shares)", { parse_mode: "HTML" });
+        } catch (_) {}
+
+        return promptAddDescription(ctx, env.DB, draftId, draft);
+      });
+
       // --- ADD EXPENSE CALLBACKS ---
       bot.callbackQuery(/^selproj_add_(\d+)_(exp_.+)$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
@@ -958,7 +1032,7 @@ export default {
         if (!draft) return;
         draft.projectId = Number(ctx.match[1]);
         await saveDraft(env.DB, draftId, draft);
-        await promptPayerSelection(ctx, env.DB, draftId, draft.projectId, draft.amount, draft.desc);
+        await promptPayerSelection(ctx, env.DB, draftId, draft.projectId, draft.amount, draft.desc, draft.isItemized);
       });
 
       bot.callbackQuery(/^exppayer_(exp_.+)_(-?\d+)$/, async (ctx) => {
@@ -972,13 +1046,20 @@ export default {
         await renderSplitSelection(ctx, env.DB, draftId, draft);
       });
 
-      async function promptPayerSelection(ctx: Context, db: D1Database, draftId: string, projId: number, amount: number, desc: string) {
+      async function promptPayerSelection(ctx: Context, db: D1Database, draftId: string, projId: number, amount: number, desc: string, isItemized: boolean = false) {
         const members = await getProjectMembers(db, projId);
         if (members.length === 0) {
           const text = `❌ <b>No members in this project yet!</b>\nUse /new or tap Join Project first.`;
           const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
           if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
-          else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+          else {
+            const sent = await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+            const d = await getDraft(db, draftId);
+            if (d) {
+              d.msgIds = Array.from(new Set([...(d.msgIds || []), sent.message_id]));
+              await saveDraft(db, draftId, d);
+            }
+          }
           return;
         }
         const kb = new InlineKeyboard();
@@ -989,9 +1070,18 @@ export default {
         if (members.length % 2 !== 0) kb.row();
         kb.text("❌ Cancel", `canceldraft_${draftId}`);
 
-        const text = `🧾 <b>${escapeHtml(desc)}</b> (${amount})\n👉 <b>Who paid?</b>`;
-        if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
-        else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+        const amountLabel = isItemized ? "(⚡ Unequal Share)" : `(${amount})`;
+        const text = `🧾 <b>${escapeHtml(desc)}</b> ${amountLabel}\n👉 <b>Who paid?</b>`;
+        if (ctx.callbackQuery) {
+          await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+        } else {
+          const sent = await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+          const d = await getDraft(db, draftId);
+          if (d) {
+            d.msgIds = Array.from(new Set([...(d.msgIds || []), sent.message_id]));
+            await saveDraft(db, draftId, d);
+          }
+        }
       }
 
       async function renderSplitSelection(ctx: Context, db: D1Database, draftId: string, draft: any) {
@@ -1004,9 +1094,24 @@ export default {
         }
         if (members.length % 2 !== 0) kb.row();
 
-        kb.text("⚡ Unequal Split", `expunequal_${draftId}`).text("💾 Confirm Equal", `expconfirm_${draftId}`).row();
+        if (draft.isItemized) {
+          kb.text("⚡ Enter Shares ➡️", `expunequal_${draftId}`).row();
+        } else {
+          kb.text("⚡ Unequal Split", `expunequal_${draftId}`).text("💾 Confirm Equal", `expconfirm_${draftId}`).row();
+        }
         kb.text("❌ Cancel", `canceldraft_${draftId}`);
-        await ctx.editMessageText(`🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n<i>Toggle who shares this equally, or choose Unequal:</i>`, { parse_mode: "HTML", reply_markup: kb });
+
+        const header = draft.isItemized
+          ? `🧾 <b>${escapeHtml(draft.desc)}</b> (⚡ Unequal Share)\n<i>Select who shares this expense, then enter individual shares:</i>`
+          : `🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n<i>Toggle who shares this equally, or choose Unequal:</i>`;
+
+        if (ctx.callbackQuery) {
+          await ctx.editMessageText(header, { parse_mode: "HTML", reply_markup: kb });
+        } else {
+          const sent = await ctx.reply(header, { parse_mode: "HTML", reply_markup: kb });
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), sent.message_id]));
+          await saveDraft(db, draftId, draft);
+        }
       }
 
       bot.callbackQuery(/^exptoggle_(exp_.+)_(-?\d+)$/, async (ctx) => {
@@ -1024,6 +1129,10 @@ export default {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        if (draft.isItemized || !draft.amount || draft.amount <= 0) {
+          await ctx.answerCallbackQuery("Please use Unequal Split to enter shares!").catch(() => {});
+          return;
+        }
         if (!draft.splitWith || draft.splitWith.length === 0) {
           await ctx.answerCallbackQuery("Select at least 1 person!").catch(() => {});
           return;
@@ -1062,19 +1171,139 @@ export default {
         await ctx.answerCallbackQuery().catch(() => {});
 
         draft.splitOrder = activeMembers.map(m => m.user_id);
+        draft.shares = {};
+        draft.currentShareIndex = 0;
+        draft.step = "split_step";
 
-        let msg = `⚡ <b>Unequal Split:</b> ${draft.desc} (Total: <b>${draft.amount}</b>)\n\n`;
-        msg += `Reply to this message with amounts in this order:\n`;
-        activeMembers.forEach((m, idx) => { msg += `<b>${idx + 1}.</b> ${m.name}\n`; });
-        msg += `\n<i>(e.g., "2000 4000-1000 0")</i>\n\n`;
-        msg += `<span class="tg-spoiler">[Draft: ${draftId}]</span>`;
-
-        // Keep the menu message visible during flow; record it to delete at the end
         const menuMsgId = ctx.callbackQuery.message?.message_id;
-        const promptMsg = await ctx.reply(msg, { parse_mode: "HTML", reply_markup: { force_reply: true } });
-
-        draft.msgIds = Array.from(new Set([...(draft.msgIds || []), ...(menuMsgId ? [menuMsgId] : []), promptMsg.message_id]));
+        if (menuMsgId) {
+          draft.msgIds = Array.from(new Set([...(draft.msgIds || []), menuMsgId]));
+        }
         await saveDraft(env.DB, draftId, draft);
+
+        try {
+          await ctx.editMessageText("⚡ <i>Entering unequal shares below...</i>", { parse_mode: "HTML" });
+        } catch (_) {}
+
+        await promptNextShare(ctx, env.DB, draftId, draft);
+      });
+
+      async function promptNextShare(ctx: Context, db: D1Database, draftId: string, draft: any) {
+        const members = await getProjectMembers(db, draft.projectId);
+        const currentUserId = draft.splitOrder[draft.currentShareIndex];
+        const member = members.find(m => m.user_id === currentUserId);
+        const memberName = member?.name || "Unknown";
+
+        let allocatedSum = 0;
+        for (let i = 0; i < draft.currentShareIndex; i++) {
+          const uid = draft.splitOrder[i];
+          allocatedSum += (draft.shares?.[uid] || 0);
+        }
+        allocatedSum = Math.round(allocatedSum * 100) / 100;
+
+        let progress = "";
+        for (let i = 0; i < draft.splitOrder.length; i++) {
+          const uid = draft.splitOrder[i];
+          const m = members.find(mem => mem.user_id === uid);
+          const name = m?.name || "Unknown";
+          if (i < draft.currentShareIndex) {
+            progress += `• ${escapeHtml(name)}: <b>${draft.shares?.[uid] ?? 0}</b>\n`;
+          } else if (i === draft.currentShareIndex) {
+            progress += `👉 <b>${escapeHtml(name)}:</b> <i>(awaiting reply...)</i>\n`;
+          } else {
+            progress += `• ${escapeHtml(name)}: ⏳\n`;
+          }
+        }
+
+        let status = "";
+        let placeholder = `Share for ${memberName.slice(0, 30)}`;
+        if (draft.isItemized) {
+          status = allocatedSum > 0 ? `\n💰 <b>Current Total:</b> ${allocatedSum}` : "";
+        } else {
+          const remaining = Math.round((draft.amount - allocatedSum) * 100) / 100;
+          status = `\n💰 <b>Allocated:</b> ${allocatedSum} | <b>Remaining:</b> ${remaining} (Total: ${draft.amount})`;
+          if (draft.currentShareIndex === draft.splitOrder.length - 1 && remaining > 0) {
+            placeholder = `${remaining}`;
+          }
+        }
+
+        const promptText = 
+          `⚡ <b>Unequal Split:</b> ${escapeHtml(draft.desc)}\n` +
+          `Step <b>${draft.currentShareIndex + 1}</b> of <b>${draft.splitOrder.length}</b>\n\n` +
+          progress +
+          status + `\n\n` +
+          `Reply with <b>${escapeHtml(memberName)}&#39;s share</b> (supports math like <code>2000+500</code> or <code>0</code>):\n\n` +
+          `<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`;
+
+        const replyToId = ctx.message?.message_id || ctx.callbackQuery?.message?.message_id;
+        const promptMsg = await ctx.reply(promptText, {
+          parse_mode: "HTML",
+          reply_parameters: replyToId ? { message_id: replyToId } : undefined,
+          reply_markup: {
+            force_reply: true,
+            selective: true,
+            input_field_placeholder: placeholder
+          }
+        });
+        draft.msgIds = Array.from(new Set([...(draft.msgIds || []), promptMsg.message_id]));
+        await saveDraft(db, draftId, draft);
+      }
+
+      async function finalizeUnequalExpense(
+        ctx: Context,
+        db: D1Database,
+        draftId: string,
+        draft: any,
+        userShares: { userId: number; amount: number; name: string }[]
+      ) {
+        const exp = await db.prepare(
+          "INSERT INTO expenses (project_id, payer_id, amount, description) VALUES (?, ?, ?, ?) RETURNING id"
+        ).bind(draft.projectId, draft.payerId, draft.amount, draft.desc).first() as any;
+
+        for (const s of userShares) {
+          await db.prepare(
+            "INSERT INTO expense_splits (expense_id, user_id, share_amount) VALUES (?, ?, ?)"
+          ).bind(exp.id, s.userId, s.amount).run();
+        }
+
+        await deleteDraft(db, draftId);
+        const allIds = Array.from(new Set([
+          ...(draft.msgIds || []),
+          ctx.message?.message_id,
+          ctx.callbackQuery?.message?.message_id
+        ])).filter((id): id is number => typeof id === "number" && id > 0);
+
+        const idsPayload = allIds.join("_");
+        const kb = new InlineKeyboard()
+          .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
+          .text("❌ Close", idsPayload ? `closeflow_${idsPayload}` : "closemsg");
+
+        let reportMsg = `✅ <b>Unequal Expense Saved!</b>\n🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n\n`;
+        userShares.forEach(s => reportMsg += `• ${escapeHtml(s.name)}: ${s.amount}\n`);
+
+        await ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
+
+        if (ctx.chat && allIds.length > 0) {
+          await deleteMessages(ctx, ctx.chat.id, allIds);
+        }
+      }
+
+      bot.callbackQuery(/^exp_fixsum_(exp_.+)_([0-9.]+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery().catch(() => {});
+        const draftId = ctx.match[1];
+        const newTotal = Number(ctx.match[2]);
+        const draft = await getDraft(env.DB, draftId);
+        if (!draft || !draft.splitOrder || !draft.shares) return ctx.reply("❌ Session expired.");
+
+        draft.amount = newTotal;
+        const members = await getProjectMembers(env.DB, draft.projectId);
+        const userShares = draft.splitOrder.map((uid: number) => ({
+          userId: uid,
+          amount: draft.shares[uid] || 0,
+          name: members.find(m => m.user_id === uid)?.name || "Unknown"
+        }));
+
+        return finalizeUnequalExpense(ctx, env.DB, draftId, draft, userShares);
       });
 
       // --- PAY CALLBACKS ---
