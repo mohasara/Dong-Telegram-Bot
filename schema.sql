@@ -51,3 +51,10 @@ CREATE TABLE IF NOT EXISTS drafts (
     data TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Chat settings (e.g. language preferences)
+CREATE TABLE IF NOT EXISTS chat_settings (
+    chat_id INTEGER PRIMARY KEY,
+    language TEXT DEFAULT 'en' NOT NULL
+);
+

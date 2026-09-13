@@ -1,4 +1,5 @@
 import { Bot, webhookCallback, InlineKeyboard, Keyboard, Context } from "grammy";
+import { Language, escapeHtml, t } from "./i18n";
 
 export interface Env {
   DB: D1Database;
@@ -13,14 +14,27 @@ export const GROUP_COMMANDS = [
   { command: "balances", description: "View member balances & breakdown" },
   { command: "settle", description: "Optimal settlement plan (who pays whom)" },
   { command: "projects", description: "Projects, reports & close/delete projects" },
+  { command: "lang", description: "Change language (English / فارسی)" },
   { command: "help", description: "How to use Dong Bot" },
 ];
 
-export const pvKeyboard = new Keyboard()
+export const pvKeyboardEn = new Keyboard()
   .text("👤 My Balances").text("📁 My Projects").row()
   .text("🧾 Transactions").text("❓ Help & Guide").row()
   .resized()
   .persistent();
+
+export const pvKeyboardFa = new Keyboard()
+  .text("👤 حساب من").text("📁 پروژه‌های من").row()
+  .text("🧾 تراکنش‌ها").text("❓ راهنما").row()
+  .resized()
+  .persistent();
+
+export const pvKeyboard = pvKeyboardEn;
+
+export function getPvKeyboard(lang: Language) {
+  return lang === "fa" ? pvKeyboardFa : pvKeyboardEn;
+}
 
 // ----------------------------------------------------
 // DATABASE & COMPUTATION HELPERS
@@ -58,6 +72,35 @@ function getChatIds(chatId: number): number[] {
   return Array.from(ids).filter(n => !isNaN(n));
 }
 
+async function getChatLanguage(db: D1Database, chatId: number): Promise<Language> {
+  try {
+    const ids = getChatIds(chatId);
+    const placeholders = ids.map(() => "?").join(", ");
+    const row = await db.prepare(
+      `SELECT language FROM chat_settings WHERE chat_id IN (${placeholders}) LIMIT 1`
+    ).bind(...ids).first() as any;
+    if (row && (row.language === "fa" || row.language === "en")) {
+      return row.language as Language;
+    }
+  } catch (_) {
+    try {
+      await db.prepare("CREATE TABLE IF NOT EXISTS chat_settings (chat_id INTEGER PRIMARY KEY, language TEXT DEFAULT 'en' NOT NULL)").run();
+    } catch (_) {}
+  }
+  return "en";
+}
+
+async function setChatLanguage(db: D1Database, chatId: number, lang: Language): Promise<void> {
+  try {
+    await db.prepare("INSERT OR REPLACE INTO chat_settings (chat_id, language) VALUES (?, ?)").bind(chatId, lang).run();
+  } catch (_) {
+    try {
+      await db.prepare("CREATE TABLE IF NOT EXISTS chat_settings (chat_id INTEGER PRIMARY KEY, language TEXT DEFAULT 'en' NOT NULL)").run();
+      await db.prepare("INSERT OR REPLACE INTO chat_settings (chat_id, language) VALUES (?, ?)").bind(chatId, lang).run();
+    } catch (_) {}
+  }
+}
+
 async function getActiveProjects(db: D1Database, chatId: number) {
   const ids = getChatIds(chatId);
   const placeholders = ids.map(() => "?").join(", ");
@@ -91,16 +134,6 @@ async function getDraft(db: D1Database, key: string) {
 }
 async function deleteDraft(db: D1Database, key: string) {
   await db.prepare("DELETE FROM drafts WHERE id = ?").bind(key).run();
-}
-
-function escapeHtml(str: string): string {
-  if (!str) return "";
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 async function deleteMessages(ctx: Context, chatId: number, messageIds: (number | undefined | null)[]) {
@@ -196,7 +229,6 @@ function parseMathInput(raw: string): { mathExpr: string; desc: string } {
     }
   }
 
-  // If the last math token is an operator and we have description tokens, move it to description
   while (mathTokens.length > 1 && /^[+\-*/]+$/.test(mathTokens[mathTokens.length - 1]) && descTokens.length > 0) {
     descTokens.unshift(mathTokens.pop()!);
   }
@@ -234,9 +266,9 @@ async function calculateBalances(db: D1Database, projectId: number) {
   }
 
   const { results: transfers } = await db.prepare("SELECT * FROM settlements WHERE project_id = ?").bind(projectId).all();
-  for (const t of (transfers as any[])) {
-    if (netBalances[t.from_user_id] !== undefined) netBalances[t.from_user_id] += Number(t.amount);
-    if (netBalances[t.to_user_id] !== undefined) netBalances[t.to_user_id] -= Number(t.amount);
+  for (const tItem of (transfers as any[])) {
+    if (netBalances[tItem.from_user_id] !== undefined) netBalances[tItem.from_user_id] += Number(tItem.amount);
+    if (netBalances[tItem.to_user_id] !== undefined) netBalances[tItem.to_user_id] -= Number(tItem.amount);
   }
   return { netBalances, names, totalPaid, totalShare, members };
 }
@@ -258,17 +290,18 @@ function getSettlementTransactions(netBalances: Record<number, number>) {
   return transactions;
 }
 
-function solveSettlement(netBalances: Record<number, number>, names: Record<number, string>, currency: string) {
+function solveSettlement(netBalances: Record<number, number>, names: Record<number, string>, currency: string, lang: Language = "en") {
   const txs = getSettlementTransactions(netBalances);
-  return txs.map(t => `\u200E💸 <b>${escapeHtml(names[t.from] || 'Unknown')}</b> to <b>${escapeHtml(names[t.to] || 'Unknown')}</b>: <b>${t.amount.toFixed(2)}${currency ? ' ' + escapeHtml(currency) : ''}</b>`);
+  const currStr = currency ? ' ' + escapeHtml(currency) : '';
+  return txs.map(tItem => t.settleTransferLine(lang, names[tItem.from] || 'Unknown', names[tItem.to] || 'Unknown', `${tItem.amount.toFixed(2)}${currStr}`));
 }
 
-async function routeProjectCommand(ctx: Context, db: D1Database, action: string, payload: string = "", cmdMsgId: number = 0): Promise<{ projectId: number | null }> {
+async function routeProjectCommand(ctx: Context, db: D1Database, action: string, payload: string = "", cmdMsgId: number = 0, lang: Language = "en"): Promise<{ projectId: number | null }> {
   if (!ctx.chat) return { projectId: null };
   const active = await getActiveProjects(db, ctx.chat.id);
   if (active.length === 0) {
-    const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-    await ctx.reply("❌ No active projects.", { reply_markup: kb });
+    const kb = new InlineKeyboard().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+    await ctx.reply(t.noActiveProjects(lang), { reply_markup: kb });
     return { projectId: null };
   }
   if (active.length === 1) return { projectId: active[0].id };
@@ -279,13 +312,13 @@ async function routeProjectCommand(ctx: Context, db: D1Database, action: string,
     kb.text(`${p.name}${p.currency ? ' (' + p.currency + ')' : ''}`, data).row();
   }
   if (payload.startsWith("exp_") || payload.startsWith("pay_")) {
-    kb.text("❌ Cancel", `canceldraft_${payload}`).row();
+    kb.text(t.cancelBtn(lang), `canceldraft_${payload}`).row();
   } else if (cmdMsgId) {
-    kb.text("❌ Close", `closeflow_${cmdMsgId}`).row();
+    kb.text(t.closeBtn(lang), `closeflow_${cmdMsgId}`).row();
   } else {
-    kb.text("❌ Close", "closemsg").row();
+    kb.text(t.closeBtn(lang), "closemsg").row();
   }
-  await ctx.reply("📁 Choose a project:", { reply_markup: kb });
+  await ctx.reply(t.chooseProject(lang), { reply_markup: kb });
   return { projectId: null };
 }
 
@@ -309,24 +342,29 @@ export default {
         console.error("Unhandled error in bot handler:", err.error || err);
       });
 
-      const createProjectAndFinish = async (ctx: Context, name: string, currency: string, draftId: string, msgIds: number[]) => {
+      const createProjectAndFinish = async (ctx: Context, name: string, currency: string, draftId: string, msgIds: number[], lang: Language) => {
         if (!ctx.chat) return;
         const proj = await env.DB.prepare("INSERT INTO projects (chat_id, name, currency) VALUES (?, ?, ?) RETURNING id").bind(ctx.chat.id, name, currency).first() as any;
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(proj.id, ctx.from!.id, ctx.from!.first_name).run();
         if (draftId) await deleteDraft(env.DB, draftId);
 
         const mainCmdId = msgIds.find(id => id > 0) || 0;
-        const kb = new InlineKeyboard().text("✋ Join Project", mainCmdId ? `join_${proj.id}_${mainCmdId}` : `join_${proj.id}`).text("✅ Done Adding", mainCmdId ? `join_done_${proj.id}_${mainCmdId}` : `join_done_${proj.id}`);
-        await ctx.reply(`🎉 Project <b>${escapeHtml(name)}</b>${currency ? ' (' + escapeHtml(currency) + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${escapeHtml(ctx.from!.first_name)}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${proj.id}_${mainCmdId}]</span>`, { parse_mode: "HTML", reply_markup: kb });
+        const kb = new InlineKeyboard()
+          .text(t.joinProjectBtn(lang), mainCmdId ? `join_${proj.id}_${mainCmdId}` : `join_${proj.id}`)
+          .text(t.doneAddingBtn(lang), mainCmdId ? `join_done_${proj.id}_${mainCmdId}` : `join_done_${proj.id}`);
+        await ctx.reply(
+          t.projectCreated(lang, name, currency, escapeHtml(ctx.from!.first_name), `project_join_${proj.id}_${mainCmdId}`),
+          { parse_mode: "HTML", reply_markup: kb }
+        );
 
         if (msgIds.length > 0) {
           await deleteMessages(ctx, ctx.chat.id, msgIds);
         }
       };
 
-      const processNew = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
+      const processNew = async (ctx: Context, args: string[], initialMsgIds: number[] = [], lang: Language) => {
         if (!ctx.chat) return;
-        if (!args || args.length === 0) return ctx.reply("❌ Missing project name.");
+        if (!args || args.length === 0) return ctx.reply(t.missingProjectName(lang));
         let name = args[0];
         let currency = "";
         if (args.length === 2) {
@@ -340,13 +378,13 @@ export default {
             name = args.join(" ");
           }
         }
-        await createProjectAndFinish(ctx, name, currency, "", initialMsgIds);
+        await createProjectAndFinish(ctx, name, currency, "", initialMsgIds, lang);
       };
 
-      const promptAddDescription = async (ctx: Context, db: D1Database, draftId: string, draft: any) => {
+      const promptAddDescription = async (ctx: Context, db: D1Database, draftId: string, draft: any, lang: Language) => {
         const promptText = draft.isItemized
-          ? `⚡ <b>Unequal Expense</b>\nReply with an optional <b>Description</b> (e.g. <code>Dinner</code>) or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`
-          : `💰 Amount: <b>${draft.amount}</b>\nReply with an optional <b>Description</b> (e.g. <code>Dinner</code>) or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`;
+          ? t.addStep2PromptUnequal(lang, draftId)
+          : t.addStep2PromptFixed(lang, draft.amount, draftId);
 
         const replyToId = ctx.message?.message_id || ctx.callbackQuery?.message?.message_id;
         const promptMsg = await ctx.reply(promptText, {
@@ -354,38 +392,42 @@ export default {
           reply_parameters: replyToId ? { message_id: replyToId } : undefined,
           reply_markup: {
             force_reply: true,
-            input_field_placeholder: "Description or tap Skip"
+            input_field_placeholder: t.addStep2Placeholder(lang)
           }
         });
         const kb = new InlineKeyboard()
-          .text("⏩ Skip", `add_skip_desc_${draftId}`)
-          .text("❌ Cancel", `canceldraft_${draftId}`);
+          .text(t.skipBtn(lang), `add_skip_desc_${draftId}`)
+          .text(t.cancelBtn(lang), `canceldraft_${draftId}`);
         const optMsg = await ctx.reply(
-          `<i>Quick actions:</i>\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`,
+          t.quickActions(lang, `add_step2_${draftId}`),
           { parse_mode: "HTML", reply_markup: kb }
         );
         draft.msgIds = Array.from(new Set([...(draft.msgIds || []), promptMsg.message_id, optMsg.message_id]));
+        draft.lang = lang;
         await saveDraft(db, draftId, draft);
       };
 
-      const startAddPayerFlow = async (ctx: Context, draftId: string, draft: any) => {
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "add", draftId);
+      const startAddPayerFlow = async (ctx: Context, draftId: string, draft: any, lang: Language) => {
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "add", draftId, 0, lang);
         draft.projectId = projectId;
         draft.payerId = null;
         draft.splitWith = [];
+        draft.lang = lang;
         await saveDraft(env.DB, draftId, draft);
         if (projectId) {
-          await promptPayerSelection(ctx, env.DB, draftId, projectId, draft.amount, draft.desc, draft.isItemized);
+          await promptPayerSelection(ctx, env.DB, draftId, projectId, draft.amount, draft.desc, draft.isItemized, lang);
         }
       };
 
-      const processAdd = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
+      const processAdd = async (ctx: Context, args: string[], initialMsgIds: number[] = [], lang: Language) => {
         if (!ctx.chat) return;
         const raw = (args || []).join(" ");
         const { mathExpr, desc: parsedDesc } = parseMathInput(raw);
-        if (!mathExpr) return ctx.reply("❌ Missing expense amount.");
+        if (!mathExpr) return ctx.reply(t.missingExpenseAmount(lang));
         const evaluated = safeEval(mathExpr);
-        if (isNaN(evaluated) || !isFinite(evaluated) || evaluated <= 0) return ctx.reply(`❌ Invalid math or amount: '<code>${escapeHtml(mathExpr)}</code>'`, { parse_mode: "HTML" });
+        if (isNaN(evaluated) || !isFinite(evaluated) || evaluated <= 0) {
+          return ctx.reply(t.invalidMathOrAmount(lang, mathExpr), { parse_mode: "HTML" });
+        }
         const amount = Math.round(evaluated * 100) / 100;
         
         let desc = parsedDesc;
@@ -394,30 +436,32 @@ export default {
         }
 
         const draftId = `exp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-        const draft = { amount, desc, projectId: null, payerId: null, splitWith: [], msgIds: initialMsgIds, step: "payer" };
+        const draft = { amount, desc, projectId: null, payerId: null, splitWith: [], msgIds: initialMsgIds, step: "payer", lang };
         await saveDraft(env.DB, draftId, draft);
-        await startAddPayerFlow(ctx, draftId, draft);
+        await startAddPayerFlow(ctx, draftId, draft, lang);
       };
 
-      const processPay = async (ctx: Context, args: string[], initialMsgIds: number[] = []) => {
+      const processPay = async (ctx: Context, args: string[], initialMsgIds: number[] = [], lang: Language) => {
         if (!ctx.chat) return;
         const raw = (args || []).join(" ");
         const { mathExpr } = parseMathInput(raw);
-        if (!mathExpr) return ctx.reply("❌ Missing payment amount.");
+        if (!mathExpr) return ctx.reply(t.missingPaymentAmount(lang));
         const evaluated = safeEval(mathExpr);
-        if (isNaN(evaluated) || !isFinite(evaluated) || evaluated <= 0) return ctx.reply(`❌ Invalid math or amount: '<code>${escapeHtml(mathExpr)}</code>'`, { parse_mode: "HTML" });
+        if (isNaN(evaluated) || !isFinite(evaluated) || evaluated <= 0) {
+          return ctx.reply(t.invalidMathOrAmount(lang, mathExpr), { parse_mode: "HTML" });
+        }
         const amount = Math.round(evaluated * 100) / 100;
         const draftId = `pay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "pay", draftId);
-        await saveDraft(env.DB, draftId, { amount, projectId, fromId: null, toId: null, msgIds: initialMsgIds });
-        if (projectId) await promptPaySender(ctx, env.DB, draftId, projectId, amount);
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "pay", draftId, 0, lang);
+        await saveDraft(env.DB, draftId, { amount, projectId, fromId: null, toId: null, msgIds: initialMsgIds, lang });
+        if (projectId) await promptPaySender(ctx, env.DB, draftId, projectId, amount, lang);
       };
 
       // ====================================================
       // 1. PRIVATE CHAT (PV) SCREENS & HANDLERS
       // ====================================================
 
-      const showPrivateBalances = async (ctx: Context) => {
+      const showPrivateBalances = async (ctx: Context, lang: Language) => {
         if (!ctx.from) return;
         const userId = ctx.from.id;
         const { results: memberships } = await env.DB.prepare(
@@ -425,23 +469,23 @@ export default {
         ).bind(userId).all();
 
         if (!memberships || memberships.length === 0) {
-          return ctx.reply("You are not part of any active projects yet.", { reply_markup: pvKeyboard });
+          return ctx.reply(t.pvNotPartOfAnyActive(lang), { reply_markup: getPvKeyboard(lang) });
         }
 
-        let report = `👤 <b>Your Balances Across All Projects:</b>\n\n`;
+        let report = t.pvBalancesTitle(lang);
         const kb = new InlineKeyboard();
         for (const proj of (memberships as any[])) {
           const { netBalances } = await calculateBalances(env.DB, proj.id);
           const bal = netBalances[userId] || 0;
           const icon = bal > 0.01 ? "🟢" : bal < -0.01 ? "🔴" : "⚪";
           report += `${icon} <b>${escapeHtml(proj.name)}:</b> ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
-          kb.text(`📊 Breakdown: ${proj.name}`, `pv_proj_${proj.id}`).row();
+          kb.text(t.pvBreakdownBtn(lang, proj.name), `pv_proj_${proj.id}`).row();
         }
-        report += `\n<i>Tap a project below to see who owes whom:</i>`;
+        report += t.pvTapProjectBelow(lang);
         await ctx.reply(report, { parse_mode: "HTML", reply_markup: kb });
       };
 
-      const showPrivateProjects = async (ctx: Context) => {
+      const showPrivateProjects = async (ctx: Context, lang: Language) => {
         if (!ctx.from) return;
         const userId = ctx.from.id;
         const { results: projects } = await env.DB.prepare(
@@ -449,21 +493,22 @@ export default {
         ).bind(userId).all();
 
         if (!projects || projects.length === 0) {
-          return ctx.reply("You have not joined any projects yet.", { reply_markup: pvKeyboard });
+          return ctx.reply(t.pvNotJoinedAnyProjects(lang), { reply_markup: getPvKeyboard(lang) });
         }
 
-        let msg = `📁 <b>Your Projects:</b>\n\n`;
+        let msg = t.pvProjectsTitle(lang);
         const kb = new InlineKeyboard();
         for (const p of (projects as any[])) {
           const icon = p.status === 'active' ? '🟢' : '🔒';
+          const statusText = t.pvStatusLabel(lang, p.status);
           msg += `${icon} <b>${escapeHtml(p.name)}</b>${p.currency ? ' (' + escapeHtml(p.currency) + ')' : ''}\n`;
-          msg += `   👥 Members: ${p.member_count} | Status: <b>${p.status.toUpperCase()}</b>\n\n`;
-          kb.text(`🔍 Details: ${p.name}`, `pv_proj_${p.id}`).row();
+          msg += `${t.pvMembersCount(lang, p.member_count)} | Status: <b>${statusText}</b>\n\n`;
+          kb.text(t.pvDetailsBtn(lang, p.name), `pv_proj_${p.id}`).row();
         }
         await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
       };
 
-      const showPrivateTransactions = async (ctx: Context) => {
+      const showPrivateTransactions = async (ctx: Context, lang: Language) => {
         if (!ctx.from) return;
         const userId = ctx.from.id;
         const { results: memberships } = await env.DB.prepare(
@@ -471,14 +516,14 @@ export default {
         ).bind(userId).all();
 
         if (!memberships || memberships.length === 0) {
-          return ctx.reply("You are not part of any active projects yet.", { reply_markup: pvKeyboard });
+          return ctx.reply(t.pvNotPartOfAnyActive(lang), { reply_markup: getPvKeyboard(lang) });
         }
 
         if (memberships.length === 1) {
-          return showTransactionsMenu(ctx, env.DB, (memberships[0] as any).id, 1, 0);
+          return showTransactionsMenu(ctx, env.DB, (memberships[0] as any).id, 1, 0, lang);
         }
 
-        let msg = `📁 <b>Select a project to view its transactions:</b>\n`;
+        let msg = t.pvSelectProjectTx(lang);
         const kb = new InlineKeyboard();
         for (const proj of (memberships as any[])) {
           kb.text(`🧾 ${proj.name}${proj.currency ? ' (' + proj.currency + ')' : ''}`, `selproj_tx_${proj.id}`).row();
@@ -486,210 +531,248 @@ export default {
         await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
       };
 
-      const showPrivateHelp = async (ctx: Context) => {
-        const msg = 
-          `👋 <b>Dong Split Bot Guide</b>\n\n` +
-          `<b>How to use in groups:</b>\n` +
-          `1. Add me to your group.\n` +
-          `2. Type <code>/new &lt;Name&gt; [Currency]</code> to create a project.\n` +
-          `3. Group members tap <b>Join Project</b>.\n` +
-          `4. Log expenses with <code>/add 5000 Taxi</code> (supports math: <code>2000+3000</code>).\n` +
-          `5. Check balances anytime with <code>/balances</code> or <code>/settle</code>.\n` +
-          `6. View and manage transactions with <code>/transaction</code>.\n` +
-          `7. Record repayments with <code>/pay 1000</code>.\n` +
-          `8. View reports and close/delete projects via <code>/projects</code>.\n\n` +
-          `<i>In this private chat, you can tap the buttons below anytime to check your balances and projects!</i>`;
-        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: pvKeyboard });
+      const showPrivateHelp = async (ctx: Context, lang: Language) => {
+        await ctx.reply(t.helpPrivate(lang), { parse_mode: "HTML", reply_markup: getPvKeyboard(lang) });
       };
 
-      bot.hears("👤 My Balances", async (ctx) => {
-        if (ctx.chat?.type === "private") await showPrivateBalances(ctx);
+      bot.hears(["👤 My Balances", "👤 حساب من"], async (ctx) => {
+        if (ctx.chat?.type === "private") {
+          const lang = await getChatLanguage(env.DB, ctx.chat.id);
+          await showPrivateBalances(ctx, lang);
+        }
       });
 
-      bot.hears("📁 My Projects", async (ctx) => {
-        if (ctx.chat?.type === "private") await showPrivateProjects(ctx);
+      bot.hears(["📁 My Projects", "📁 پروژه‌های من"], async (ctx) => {
+        if (ctx.chat?.type === "private") {
+          const lang = await getChatLanguage(env.DB, ctx.chat.id);
+          await showPrivateProjects(ctx, lang);
+        }
       });
 
-      bot.hears("🧾 Transactions", async (ctx) => {
-        if (ctx.chat?.type === "private") await showPrivateTransactions(ctx);
+      bot.hears(["🧾 Transactions", "🧾 تراکنش‌ها"], async (ctx) => {
+        if (ctx.chat?.type === "private") {
+          const lang = await getChatLanguage(env.DB, ctx.chat.id);
+          await showPrivateTransactions(ctx, lang);
+        }
       });
 
-      bot.hears("❓ Help & Guide", async (ctx) => {
-        if (ctx.chat?.type === "private") await showPrivateHelp(ctx);
+      bot.hears(["❓ Help & Guide", "❓ راهنما"], async (ctx) => {
+        if (ctx.chat?.type === "private") {
+          const lang = await getChatLanguage(env.DB, ctx.chat.id);
+          await showPrivateHelp(ctx, lang);
+        }
       });
 
-      bot.hears(/^(my\s*balance|balances|حساب)$/i, async (ctx) => {
-        if (ctx.chat?.type === "private") await showPrivateBalances(ctx);
+      bot.hears(/^(my\s*balance|balances|حساب|حساب من)$/i, async (ctx) => {
+        if (ctx.chat?.type === "private") {
+          const lang = await getChatLanguage(env.DB, ctx.chat.id);
+          await showPrivateBalances(ctx, lang);
+        }
       });
 
-      bot.hears(/^(projects|پروژه.*)$/i, async (ctx) => {
-        if (ctx.chat?.type === "private") await showPrivateProjects(ctx);
+      bot.hears(/^(projects|پروژه‌ها|پروژه.*)$/i, async (ctx) => {
+        if (ctx.chat?.type === "private") {
+          const lang = await getChatLanguage(env.DB, ctx.chat.id);
+          await showPrivateProjects(ctx, lang);
+        }
       });
 
-      bot.hears(/^(transactions?|tx|تراکنش.*)$/i, async (ctx) => {
-        if (ctx.chat?.type === "private") await showPrivateTransactions(ctx);
+      bot.hears(/^(transactions?|tx|تراکنش|تراکنش‌ها.*)$/i, async (ctx) => {
+        if (ctx.chat?.type === "private") {
+          const lang = await getChatLanguage(env.DB, ctx.chat.id);
+          await showPrivateTransactions(ctx, lang);
+        }
       });
 
       bot.hears(/^(help|راهنما)$/i, async (ctx) => {
-        if (ctx.chat?.type === "private") await showPrivateHelp(ctx);
+        if (ctx.chat?.type === "private") {
+          const lang = await getChatLanguage(env.DB, ctx.chat.id);
+          await showPrivateHelp(ctx, lang);
+        }
       });
 
       // ====================================================
       // 2. COMMANDS
       // ====================================================
 
+      bot.command(["lang", "language", "zaban"], async (ctx) => {
+        if (!ctx.chat) return;
+        const cmdMsgId = ctx.message?.message_id || 0;
+        const currentLang = await getChatLanguage(env.DB, ctx.chat.id);
+        const kb = new InlineKeyboard()
+          .text(t.langBtnEn(), cmdMsgId ? `setlang_en_${cmdMsgId}` : "setlang_en")
+          .text(t.langBtnFa(), cmdMsgId ? `setlang_fa_${cmdMsgId}` : "setlang_fa")
+          .row()
+          .text(t.closeBtn(currentLang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        await ctx.reply(t.chooseLangPrompt(), { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      bot.callbackQuery(/^setlang_(en|fa)(?:_(\d+))?$/, async (ctx) => {
+        if (!ctx.chat) return;
+        const chosenLang = ctx.match[1] as Language;
+        const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
+        await setChatLanguage(env.DB, ctx.chat.id, chosenLang);
+        await ctx.answerCallbackQuery(chosenLang === "fa" ? "زبان روی فارسی تنظیم شد!" : "Language set to English!").catch(() => {});
+
+        const kb = new InlineKeyboard().text(t.closeBtn(chosenLang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        if (ctx.chat.type === "private") {
+          await ctx.reply(t.langChanged(chosenLang), { parse_mode: "HTML", reply_markup: getPvKeyboard(chosenLang) });
+          if (ctx.callbackQuery?.message) {
+            await ctx.deleteMessage().catch(() => {});
+          }
+        } else {
+          await ctx.editMessageText(t.langChanged(chosenLang), { parse_mode: "HTML", reply_markup: kb });
+        }
+      });
+
       bot.command("start", async (ctx) => {
         if (!ctx.chat) return;
+        const lang = await getChatLanguage(env.DB, ctx.chat.id);
         if (ctx.chat.type === "private") {
-          return ctx.reply(
-            `👋 <b>Welcome to Dong Split Bot!</b>\n\n` +
-            `Here in private chat, you can check your debts, credits, and active projects across all your groups without using slash commands.\n\n` +
-            `👇 <b>Tap a button below:</b>`,
-            { parse_mode: "HTML", reply_markup: pvKeyboard }
-          );
+          return ctx.reply(t.startPrivate(lang), { parse_mode: "HTML", reply_markup: getPvKeyboard(lang) });
         }
-        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
-        await ctx.reply("👋 Dong Bot is active!\n\nCreate a project with: <code>/new &lt;Name&gt; [Currency]</code>\nType /help to see all commands.", { parse_mode: "HTML", reply_markup: kb });
+        const kb = new InlineKeyboard().text(t.closeBtn(lang), "closemsg");
+        await ctx.reply(t.startGroup(lang), { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.command("help", async (ctx) => {
         if (!ctx.chat) return;
-        if (ctx.chat.type === "private") return showPrivateHelp(ctx);
-        const msg = 
-          `📖 <b>Dong Split Bot Commands:</b>\n\n` +
-          `• <code>/new &lt;Name&gt; [Currency]</code> — Create a new project\n` +
-          `• <code>/add [amount] [desc]</code> — Record a new expense (supports math: <code>5000+2000 Taxi</code>)\n` +
-          `• <code>/pay [amount]</code> — Record a transfer (supports math: <code>10000/2</code>)\n` +
-          `• <code>/transaction</code> — View details and delete transactions\n` +
-          `• <code>/balances</code> — View member balances and breakdown\n` +
-          `• <code>/settle</code> — Get optimal debt settlement plan\n` +
-          `• <code>/projects</code> — View projects, reports, close & delete\n` +
-          `• <code>/mybalance</code> — Check your balances in private chat\n`;
-        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
-        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
+        const lang = await getChatLanguage(env.DB, ctx.chat.id);
+        if (ctx.chat.type === "private") return showPrivateHelp(ctx, lang);
+        const kb = new InlineKeyboard().text(t.closeBtn(lang), "closemsg");
+        await ctx.reply(t.helpGroup(lang), { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.command("mybalance", async (ctx) => {
         if (!ctx.chat) return;
-        if (ctx.chat.type !== "private") return ctx.reply("Use /balances inside your group, or use private chat.");
-        await showPrivateBalances(ctx);
+        const lang = await getChatLanguage(env.DB, ctx.chat.id);
+        if (ctx.chat.type !== "private") return ctx.reply(t.myBalanceGroupNotice(lang));
+        await showPrivateBalances(ctx, lang);
       });
 
       bot.command("new", async (ctx) => {
         if (!ctx.chat) return;
-        if (ctx.chat.type === "private") return ctx.reply("Please use /new inside a group chat.");
+        const lang = await getChatLanguage(env.DB, ctx.chat.id);
+        if (ctx.chat.type === "private") return ctx.reply(t.newPrivateErr(lang));
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
           const draftId = `new_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
           const promptMsg = await ctx.reply(
-            `Reply to this message with your <b>Project Name</b> (e.g. <code>Party</code> or <code>Trip to Paris</code>):\n\n<span class="tg-spoiler">[Action: new_step1_${draftId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, input_field_placeholder: "Project Name (e.g. Party)" } }
+            t.newStep1Prompt(lang, draftId),
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, input_field_placeholder: t.newStep1Placeholder(lang) } }
           );
-          const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+          const kb = new InlineKeyboard().text(t.cancelBtn(lang), `canceldraft_${draftId}`);
           const optMsg = await ctx.reply(
-            `<i>Tap below to cancel:</i>\n<span class="tg-spoiler">[Action: new_step1_${draftId}]</span>`,
+            t.tapToCancel(lang, `new_step1_${draftId}`),
             { parse_mode: "HTML", reply_markup: kb }
           );
-          await saveDraft(env.DB, draftId, { step: "name", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id, optMsg.message_id])) });
+          await saveDraft(env.DB, draftId, { step: "name", lang, msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id, optMsg.message_id])) });
           return;
         }
-        await processNew(ctx, args, cmdMsgId ? [cmdMsgId] : []);
+        await processNew(ctx, args, cmdMsgId ? [cmdMsgId] : [], lang);
       });
 
       bot.command("add", async (ctx) => {
         if (!ctx.chat) return;
-        if (ctx.chat.type === "private") return ctx.reply("Use /add in your group.");
+        const lang = await getChatLanguage(env.DB, ctx.chat.id);
+        if (ctx.chat.type === "private") return ctx.reply(t.addPrivateErr(lang));
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
           const draftId = `exp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
           const promptMsg = await ctx.reply(
-            `Reply to this message with the <b>Expense Amount</b> (e.g. <code>50000</code> or <code>2000+3000</code>):\n\n<span class="tg-spoiler">[Action: add_step1_${draftId}]</span>`,
+            t.addStep1Prompt(lang, draftId),
             {
               parse_mode: "HTML",
               reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined,
-              reply_markup: { force_reply: true, input_field_placeholder: "Expense Amount (e.g. 50000)" }
+              reply_markup: { force_reply: true, input_field_placeholder: t.addStep1Placeholder(lang) }
             }
           );
           const kb = new InlineKeyboard()
-            .text("⚡ Unequal Share", `add_itemized_${draftId}`)
-            .text("❌ Cancel", `canceldraft_${draftId}`);
+            .text(t.unequalShareBtn(lang), `add_itemized_${draftId}`)
+            .text(t.cancelBtn(lang), `canceldraft_${draftId}`);
           const optMsg = await ctx.reply(
-            `<i>Don't know the total amount? Tap below:</i>\n<span class="tg-spoiler">[Action: add_step1_${draftId}]</span>`,
+            t.addStep1OptMsg(lang, draftId),
             { parse_mode: "HTML", reply_markup: kb }
           );
-          await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id, optMsg.message_id])) });
+          await saveDraft(env.DB, draftId, { step: "amount", lang, msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id, optMsg.message_id])) });
           return;
         }
         if (args[0].toLowerCase() === "unequal" || args[0].toLowerCase() === "itemized") {
           const desc = args.slice(1).join(" ").trim();
           const draftId = `exp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-          const draft = { isItemized: true, amount: 0, desc: desc || "", step: desc ? "payer" : "desc", msgIds: cmdMsgId ? [cmdMsgId] : [] };
+          const draft = { isItemized: true, amount: 0, desc: desc || "", step: desc ? "payer" : "desc", lang, msgIds: cmdMsgId ? [cmdMsgId] : [] };
           await saveDraft(env.DB, draftId, draft);
           if (desc) {
-            return startAddPayerFlow(ctx, draftId, draft);
+            return startAddPayerFlow(ctx, draftId, draft, lang);
           } else {
-            return promptAddDescription(ctx, env.DB, draftId, draft);
+            return promptAddDescription(ctx, env.DB, draftId, draft, lang);
           }
         }
-        await processAdd(ctx, args, cmdMsgId ? [cmdMsgId] : []);
+        await processAdd(ctx, args, cmdMsgId ? [cmdMsgId] : [], lang);
       });
 
       bot.command("pay", async (ctx) => {
         if (!ctx.chat) return;
-        if (ctx.chat.type === "private") return ctx.reply("Use /pay in your group.");
+        const lang = await getChatLanguage(env.DB, ctx.chat.id);
+        if (ctx.chat.type === "private") return ctx.reply(t.payPrivateErr(lang));
         const cmdMsgId = ctx.message?.message_id || 0;
         const args = ctx.match.trim().split(/\s+/).filter(Boolean);
         if (args.length === 0) {
           const draftId = `pay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
           const promptMsg = await ctx.reply(
-            `Reply with the <b>Payment Amount</b> (e.g. <code>50000</code> or <code>10000/2</code>):\n\n<span class="tg-spoiler">[Action: pay_step1_${draftId}]</span>`,
-            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, input_field_placeholder: "Payment Amount (e.g. 50000)" } }
+            t.payStep1Prompt(lang, draftId),
+            { parse_mode: "HTML", reply_parameters: cmdMsgId ? { message_id: cmdMsgId } : undefined, reply_markup: { force_reply: true, input_field_placeholder: t.payStep1Placeholder(lang) } }
           );
-          const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+          const kb = new InlineKeyboard().text(t.cancelBtn(lang), `canceldraft_${draftId}`);
           const optMsg = await ctx.reply(
-            `<i>Tap below to cancel:</i>\n<span class="tg-spoiler">[Action: pay_step1_${draftId}]</span>`,
+            t.tapToCancel(lang, `pay_step1_${draftId}`),
             { parse_mode: "HTML", reply_markup: kb }
           );
-          await saveDraft(env.DB, draftId, { step: "amount", msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id, optMsg.message_id])) });
+          await saveDraft(env.DB, draftId, { step: "amount", lang, msgIds: Array.from(new Set([...(cmdMsgId ? [cmdMsgId] : []), promptMsg.message_id, optMsg.message_id])) });
           return;
         }
-        await processPay(ctx, args, cmdMsgId ? [cmdMsgId] : []);
+        await processPay(ctx, args, cmdMsgId ? [cmdMsgId] : [], lang);
       });
 
       bot.command(["transaction", "transactions", "tx", "trans"], async (ctx) => {
         if (!ctx.chat) return;
+        const lang = await getChatLanguage(env.DB, ctx.chat.id);
         const cmdMsgId = ctx.message?.message_id || 0;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "tx", "", cmdMsgId);
-        if (projectId) await showTransactionsMenu(ctx, env.DB, projectId, 1, cmdMsgId);
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "tx", "", cmdMsgId, lang);
+        if (projectId) await showTransactionsMenu(ctx, env.DB, projectId, 1, cmdMsgId, lang);
       });
 
       bot.command("delete", async (ctx) => {
-        await ctx.reply("💡 The <code>/delete</code> command has been retired. Please use <code>/transaction</code> to view and delete transactions.", { parse_mode: "HTML" });
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        await ctx.reply(t.deleteRetired(lang), { parse_mode: "HTML" });
       });
 
       bot.command("balances", async (ctx) => {
         if (!ctx.chat) return;
+        const lang = await getChatLanguage(env.DB, ctx.chat.id);
         const cmdMsgId = ctx.message?.message_id || 0;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "bal", "", cmdMsgId);
-        if (projectId) await showBalancesMenu(ctx, env.DB, projectId, cmdMsgId);
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "bal", "", cmdMsgId, lang);
+        if (projectId) await showBalancesMenu(ctx, env.DB, projectId, cmdMsgId, lang);
       });
 
       bot.command("settle", async (ctx) => {
         if (!ctx.chat) return;
+        const lang = await getChatLanguage(env.DB, ctx.chat.id);
         const cmdMsgId = ctx.message?.message_id || 0;
-        const { projectId } = await routeProjectCommand(ctx, env.DB, "settle", "", cmdMsgId);
-        if (projectId) await showSettlement(ctx, env.DB, projectId, cmdMsgId);
+        const { projectId } = await routeProjectCommand(ctx, env.DB, "settle", "", cmdMsgId, lang);
+        if (projectId) await showSettlement(ctx, env.DB, projectId, cmdMsgId, lang);
       });
 
       bot.command(["projects", "report"], async (ctx) => {
         if (!ctx.chat) return;
+        const lang = await getChatLanguage(env.DB, ctx.chat.id);
         const projects = await getAllProjects(env.DB, ctx.chat.id);
         const cmdMsgId = ctx.message?.message_id || 0;
         if (projects.length === 0) {
-          const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-          return ctx.reply("❌ No projects found for this group.", { reply_markup: kb });
+          const kb = new InlineKeyboard().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          return ctx.reply(t.noProjectsFound(lang), { reply_markup: kb });
         }
         const kb = new InlineKeyboard();
         for (const p of projects) {
@@ -697,12 +780,13 @@ export default {
           const data = cmdMsgId ? `selproj_report_${p.id}_${cmdMsgId}` : `selproj_report_${p.id}`;
           kb.text(`${statusIcon} ${p.name}${p.currency ? ' (' + p.currency + ')' : ''}`, data).row();
         }
-        kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-        await ctx.reply("📜 <b>Projects & Reports:</b>\nSelect any project to view its report, close, or delete it:", { parse_mode: "HTML", reply_markup: kb });
+        kb.text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        await ctx.reply(t.projectsMenuTitle(lang), { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.command("close", async (ctx) => {
-        await ctx.reply("💡 The <code>/close</code> command has been moved into <code>/projects</code>. Tap an open project in <code>/projects</code> to close it.", { parse_mode: "HTML" });
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        await ctx.reply(t.closeMoved(lang), { parse_mode: "HTML" });
       });
 
       // ====================================================
@@ -712,6 +796,7 @@ export default {
       bot.on("message:text", async (ctx, next) => {
         const replyTo = ctx.message.reply_to_message;
         if (!replyTo || !replyTo.text) return next();
+        const chatLang = await getChatLanguage(env.DB, ctx.chat.id);
 
         // Catch offline member additions by replying to the project invitation message
         const joinMatch = replyTo.text.match(/\[Action:\s*project_join_(\d+)(?:_(\d+))?\]/);
@@ -726,7 +811,6 @@ export default {
 
           for (const rawName of names) {
             const cleanName = rawName.slice(0, 32);
-            // Deduplicate members by name
             const existing = await env.DB.prepare("SELECT id FROM project_members WHERE project_id = ? AND LOWER(name) = LOWER(?)").bind(projectId, cleanName).first();
             if (existing) continue;
 
@@ -735,21 +819,19 @@ export default {
             await env.DB.prepare("INSERT INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(projectId, nextUserId, cleanName).run();
           }
 
-          // Delete the user's name message so group stays clean
           if (ctx.chat) {
             await deleteMessages(ctx, ctx.chat.id, [ctx.message.message_id]);
           }
 
-          // Update the project announcement message
           const members = await getProjectMembers(env.DB, projectId);
           const kb = new InlineKeyboard()
-            .text("✋ Join Project", cmdMsgId ? `join_${projectId}_${cmdMsgId}` : `join_${projectId}`)
-            .text("✅ Done Adding", cmdMsgId ? `join_done_${projectId}_${cmdMsgId}` : `join_done_${projectId}`);
+            .text(t.joinProjectBtn(chatLang), cmdMsgId ? `join_${projectId}_${cmdMsgId}` : `join_${projectId}`)
+            .text(t.doneAddingBtn(chatLang), cmdMsgId ? `join_done_${projectId}_${cmdMsgId}` : `join_done_${projectId}`);
           try {
             await ctx.api.editMessageText(
               ctx.chat.id,
               replyTo.message_id,
-              `🎉 Project <b>${escapeHtml(proj.name)}</b>${proj.currency ? ' (' + escapeHtml(proj.currency) + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${members.map(m => escapeHtml(m.name)).join(", ")}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${projectId}_${cmdMsgId}]</span>`,
+              t.projectCreated(chatLang, proj.name, proj.currency, members.map(m => escapeHtml(m.name)).join(", "), `project_join_${projectId}_${cmdMsgId}`),
               { parse_mode: "HTML", reply_markup: kb }
             );
           } catch (_) {}
@@ -761,27 +843,27 @@ export default {
         if (newStep1Match) {
           const draftId = newStep1Match[1];
           const draft = await getDraft(env.DB, draftId);
-          if (!draft) return ctx.reply("❌ Session expired. Please run /new again.");
+          const draftLang = draft?.lang || chatLang;
+          if (!draft) return ctx.reply(t.sessionExpired(draftLang));
 
           const text = ctx.message.text.trim();
-          if (text.toLowerCase() === "cancel" || text.toLowerCase() === "/cancel") {
+          if (text.toLowerCase() === "cancel" || text.toLowerCase() === "/cancel" || text === "انصراف") {
             await deleteDraft(env.DB, draftId);
             const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
             if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
-            return ctx.reply("❌ Project creation cancelled.");
+            return ctx.reply(t.projectCancelled(draftLang));
           }
-          if (!text) return ctx.reply("❌ Please provide a valid project name.");
+          if (!text) return ctx.reply(t.missingProjectName(draftLang));
 
           draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
           
-          // Check if user already provided name and currency in this single reply
           const parts = text.split(/\s+/).filter(Boolean);
           if (parts.length > 1) {
             const last = parts[parts.length - 1];
             if (/^[$€£¥﷼]|^(USD|EUR|GBP|IRR|TOMAN|CAD|AUD)$/i.test(last)) {
               const name = parts.slice(0, -1).join(" ");
               const currency = last;
-              await createProjectAndFinish(ctx, name, currency, draftId, draft.msgIds);
+              await createProjectAndFinish(ctx, name, currency, draftId, draft.msgIds, draftLang);
               return;
             }
           }
@@ -791,18 +873,18 @@ export default {
           await saveDraft(env.DB, draftId, draft);
 
           const prompt2 = await ctx.reply(
-            `📁 Project: <b>${escapeHtml(draft.name)}</b>\n\nReply with an optional <b>Currency</b> (e.g. <code>$</code>, <code>€</code>, <code>Toman</code>), or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: new_step2_${draftId}]</span>`,
+            t.newStep2Prompt(draftLang, draft.name, draftId),
             {
               parse_mode: "HTML",
               reply_parameters: { message_id: ctx.message.message_id },
-              reply_markup: { force_reply: true, input_field_placeholder: "Currency or tap Skip" }
+              reply_markup: { force_reply: true, input_field_placeholder: t.newStep2Placeholder(draftLang) }
             }
           );
           const kb2 = new InlineKeyboard()
-            .text("⏩ Skip", `new_skip_curr_${draftId}`)
-            .text("❌ Cancel", `canceldraft_${draftId}`);
+            .text(t.skipBtn(draftLang), `new_skip_curr_${draftId}`)
+            .text(t.cancelBtn(draftLang), `canceldraft_${draftId}`);
           const opt2 = await ctx.reply(
-            `<i>Quick actions:</i>\n<span class="tg-spoiler">[Action: new_step2_${draftId}]</span>`,
+            t.quickActions(draftLang, `new_step2_${draftId}`),
             { parse_mode: "HTML", reply_markup: kb2 }
           );
           draft.msgIds = Array.from(new Set([...(draft.msgIds || []), prompt2.message_id, opt2.message_id]));
@@ -815,20 +897,21 @@ export default {
         if (newStep2Match) {
           const draftId = newStep2Match[1];
           const draft = await getDraft(env.DB, draftId);
-          if (!draft) return ctx.reply("❌ Session expired. Please run /new again.");
+          const draftLang = draft?.lang || chatLang;
+          if (!draft) return ctx.reply(t.sessionExpired(draftLang));
 
           let currency = ctx.message.text.trim();
-          if (currency.toLowerCase() === "cancel" || currency.toLowerCase() === "/cancel") {
+          if (currency.toLowerCase() === "cancel" || currency.toLowerCase() === "/cancel" || currency === "انصراف") {
             await deleteDraft(env.DB, draftId);
             const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
             if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
-            return ctx.reply("❌ Project creation cancelled.");
+            return ctx.reply(t.projectCancelled(draftLang));
           }
-          if (currency === "-" || currency.toLowerCase() === "skip" || currency.toLowerCase() === "none" || currency === ".") {
+          if (currency === "-" || currency.toLowerCase() === "skip" || currency.toLowerCase() === "none" || currency === "." || currency === "رد کردن") {
             currency = "";
           }
           draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
-          await createProjectAndFinish(ctx, draft.name, currency, draftId, draft.msgIds);
+          await createProjectAndFinish(ctx, draft.name, currency, draftId, draft.msgIds, draftLang);
           return;
         }
 
@@ -837,28 +920,29 @@ export default {
         if (addStep1Match) {
           const draftId = addStep1Match[1];
           const draft = await getDraft(env.DB, draftId);
-          if (!draft) return ctx.reply("❌ Session expired. Please run /add again.");
+          const draftLang = draft?.lang || chatLang;
+          if (!draft) return ctx.reply(t.sessionExpired(draftLang));
 
           const raw = ctx.message.text.trim();
-          if (raw.toLowerCase() === "cancel" || raw.toLowerCase() === "/cancel") {
+          if (raw.toLowerCase() === "cancel" || raw.toLowerCase() === "/cancel" || raw === "انصراف") {
             await deleteDraft(env.DB, draftId);
             const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
             if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
-            return ctx.reply("❌ Expense cancelled.");
+            return ctx.reply(t.expenseCancelled(draftLang));
           }
-          if (raw.toLowerCase() === "unequal" || raw.toLowerCase() === "itemized" || raw === "-" || raw.toLowerCase() === "skip") {
+          if (raw.toLowerCase() === "unequal" || raw.toLowerCase() === "itemized" || raw === "-" || raw.toLowerCase() === "skip" || raw === "دانگ نامساوی" || raw === "رد کردن") {
             draft.isItemized = true;
             draft.amount = 0;
             draft.step = "desc";
             draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
             await saveDraft(env.DB, draftId, draft);
-            return promptAddDescription(ctx, env.DB, draftId, draft);
+            return promptAddDescription(ctx, env.DB, draftId, draft, draftLang);
           }
           const { mathExpr, desc: parsedDesc } = parseMathInput(raw);
-          if (!mathExpr) return ctx.reply("❌ Missing expense amount. Please reply with an amount (e.g. <code>50000</code> or <code>2000+3000</code>):", { parse_mode: "HTML" });
+          if (!mathExpr) return ctx.reply(t.missingExpenseAmount(draftLang));
           const evaluated = safeEval(mathExpr);
           if (isNaN(evaluated) || !isFinite(evaluated) || evaluated <= 0) {
-            return ctx.reply(`❌ Invalid math or amount: '<code>${escapeHtml(mathExpr)}</code>'`, { parse_mode: "HTML" });
+            return ctx.reply(t.invalidMathOrAmount(draftLang, mathExpr), { parse_mode: "HTML" });
           }
           const amount = Math.round(evaluated * 100) / 100;
           draft.amount = amount;
@@ -868,12 +952,12 @@ export default {
             draft.desc = parsedDesc;
             draft.step = "payer";
             await saveDraft(env.DB, draftId, draft);
-            return startAddPayerFlow(ctx, draftId, draft);
+            return startAddPayerFlow(ctx, draftId, draft, draftLang);
           }
 
           draft.step = "desc";
           await saveDraft(env.DB, draftId, draft);
-          return promptAddDescription(ctx, env.DB, draftId, draft);
+          return promptAddDescription(ctx, env.DB, draftId, draft, draftLang);
         }
 
         // --- Step-by-Step /add: Step 2 (Description) ---
@@ -881,23 +965,24 @@ export default {
         if (addStep2Match) {
           const draftId = addStep2Match[1];
           const draft = await getDraft(env.DB, draftId);
-          if (!draft) return ctx.reply("❌ Session expired. Please run /add again.");
+          const draftLang = draft?.lang || chatLang;
+          if (!draft) return ctx.reply(t.sessionExpired(draftLang));
 
           let desc = ctx.message.text.trim();
-          if (desc.toLowerCase() === "cancel" || desc.toLowerCase() === "/cancel") {
+          if (desc.toLowerCase() === "cancel" || desc.toLowerCase() === "/cancel" || desc === "انصراف") {
             await deleteDraft(env.DB, draftId);
             const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
             if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
-            return ctx.reply("❌ Expense cancelled.");
+            return ctx.reply(t.expenseCancelled(draftLang));
           }
-          if (!desc || desc === "-" || desc.toLowerCase() === "skip" || desc.toLowerCase() === "none" || desc === ".") {
+          if (!desc || desc === "-" || desc.toLowerCase() === "skip" || desc.toLowerCase() === "none" || desc === "." || desc === "رد کردن") {
             desc = new Date().toISOString().replace('T', ' ').substring(0, 16);
           }
           draft.desc = desc;
           draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
           draft.step = "payer";
           await saveDraft(env.DB, draftId, draft);
-          return startAddPayerFlow(ctx, draftId, draft);
+          return startAddPayerFlow(ctx, draftId, draft, draftLang);
         }
 
         // --- Step-by-Step /pay: Step 1 (Amount) ---
@@ -905,35 +990,36 @@ export default {
         if (payStep1Match) {
           const draftId = payStep1Match[1];
           const draft = await getDraft(env.DB, draftId);
-          if (!draft) return ctx.reply("❌ Session expired. Please run /pay again.");
+          const draftLang = draft?.lang || chatLang;
+          if (!draft) return ctx.reply(t.sessionExpired(draftLang));
 
           const raw = ctx.message.text.trim();
-          if (raw.toLowerCase() === "cancel" || raw.toLowerCase() === "/cancel") {
+          if (raw.toLowerCase() === "cancel" || raw.toLowerCase() === "/cancel" || raw === "انصراف") {
             await deleteDraft(env.DB, draftId);
             const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
             if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
-            return ctx.reply("❌ Payment cancelled.");
+            return ctx.reply(t.paymentCancelled(draftLang));
           }
           const { mathExpr } = parseMathInput(raw);
-          if (!mathExpr) return ctx.reply("❌ Missing payment amount. Please reply with an amount (e.g. <code>50000</code> or <code>10000/2</code>):", { parse_mode: "HTML" });
+          if (!mathExpr) return ctx.reply(t.missingPaymentAmount(draftLang));
           const evaluated = safeEval(mathExpr);
           if (isNaN(evaluated) || !isFinite(evaluated) || evaluated <= 0) {
-            return ctx.reply(`❌ Invalid math or amount: '<code>${escapeHtml(mathExpr)}</code>'`, { parse_mode: "HTML" });
+            return ctx.reply(t.invalidMathOrAmount(draftLang, mathExpr), { parse_mode: "HTML" });
           }
           const amount = Math.round(evaluated * 100) / 100;
           draft.amount = amount;
           draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
 
-          const { projectId } = await routeProjectCommand(ctx, env.DB, "pay", draftId);
+          const { projectId } = await routeProjectCommand(ctx, env.DB, "pay", draftId, 0, draftLang);
           draft.projectId = projectId;
           draft.fromId = null;
           draft.toId = null;
           await saveDraft(env.DB, draftId, draft);
-          if (projectId) await promptPaySender(ctx, env.DB, draftId, projectId, amount);
+          if (projectId) await promptPaySender(ctx, env.DB, draftId, projectId, amount, draftLang);
           return;
         }
 
-        // Catch legacy missing argument prompts (if any)
+        // Catch legacy missing argument prompts
         const actionMatch = replyTo.text.match(/\[Action:\s*(new_prompt|add_prompt|pay_prompt)(?:_(\d+))?\]/);
         if (actionMatch) {
           const action = actionMatch[1];
@@ -949,9 +1035,9 @@ export default {
             promptMsgIds.push(parentMsgId);
           }
           
-          if (action === "new_prompt") return processNew(ctx, args, promptMsgIds);
-          if (action === "add_prompt") return processAdd(ctx, args, promptMsgIds);
-          if (action === "pay_prompt") return processPay(ctx, args, promptMsgIds);
+          if (action === "new_prompt") return processNew(ctx, args, promptMsgIds, chatLang);
+          if (action === "add_prompt") return processAdd(ctx, args, promptMsgIds, chatLang);
+          if (action === "pay_prompt") return processPay(ctx, args, promptMsgIds, chatLang);
           return next();
         }
 
@@ -960,16 +1046,17 @@ export default {
         if (splitStepMatch) {
           const draftId = splitStepMatch[1];
           const draft = await getDraft(env.DB, draftId);
-          if (!draft || !draft.splitOrder) return ctx.reply("❌ Session expired. Please start over with /add.");
+          const draftLang = draft?.lang || chatLang;
+          if (!draft || !draft.splitOrder) return ctx.reply(t.sessionExpired(draftLang));
 
           const raw = ctx.message.text.trim();
-          if (raw.toLowerCase() === "cancel" || raw.toLowerCase() === "/cancel") {
+          if (raw.toLowerCase() === "cancel" || raw.toLowerCase() === "/cancel" || raw === "انصراف") {
             await deleteDraft(env.DB, draftId);
             const toDelete = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id])).filter((id): id is number => typeof id === "number" && id > 0);
             if (ctx.chat && toDelete.length > 0) {
               await deleteMessages(ctx, ctx.chat.id, toDelete);
             }
-            return ctx.reply("❌ Expense cancelled.");
+            return ctx.reply(t.expenseCancelled(draftLang));
           }
 
           const { mathExpr } = parseMathInput(raw);
@@ -979,16 +1066,18 @@ export default {
             const curMember = members.find(m => m.user_id === draft.splitOrder[draft.currentShareIndex]);
             const curName = curMember?.name || "this person";
             const errPrompt = await ctx.reply(
-              `❌ Invalid amount: '<code>${escapeHtml(raw)}</code>'\n\nPlease reply with a valid number or 0 for <b>${escapeHtml(curName)}</b>:\n\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
+              draftLang === 'fa'
+                ? `❌ مبلغ نامعتبر است: '<code>${escapeHtml(raw)}</code>'\n\nلطفاً یک عدد معتبر یا 0 برای <b>${escapeHtml(curName)}</b> بفرستید:\n\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`
+                : `❌ Invalid amount: '<code>${escapeHtml(raw)}</code>'\n\nPlease reply with a valid number or 0 for <b>${escapeHtml(curName)}</b>:\n\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
               {
                 parse_mode: "HTML",
                 reply_parameters: { message_id: ctx.message.message_id },
-                reply_markup: { force_reply: true, input_field_placeholder: `Share for ${curName.slice(0, 30)}` }
+                reply_markup: { force_reply: true, input_field_placeholder: t.sharePlaceholder(draftLang, curName) }
               }
             );
-            const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+            const kb = new InlineKeyboard().text(t.cancelBtn(draftLang), `canceldraft_${draftId}`);
             const errOpt = await ctx.reply(
-              `<i>Tap below to cancel:</i>\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
+              t.tapToCancel(draftLang, `split_step_${draftId}`),
               { parse_mode: "HTML", reply_markup: kb }
             );
             draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id, errPrompt.message_id, errOpt.message_id]));
@@ -999,7 +1088,6 @@ export default {
           const roundedAmt = Math.round(amt * 100) / 100;
           const currentUserId = draft.splitOrder[draft.currentShareIndex];
 
-          // If fixed total is known, validate user didn't exceed remaining
           if (!draft.isItemized && draft.amount > 0) {
             let allocatedSoFar = 0;
             for (let i = 0; i < draft.currentShareIndex; i++) {
@@ -1009,21 +1097,18 @@ export default {
             const remaining = Math.round((draft.amount - allocatedSoFar) * 100) / 100;
 
             if (roundedAmt > remaining + 0.01) {
-              const members = await getProjectMembers(env.DB, draft.projectId);
-              const curMember = members.find(m => m.user_id === currentUserId);
-              const curName = curMember?.name || "this person";
               const rem = Math.max(0, remaining);
               const errPrompt = await ctx.reply(
-                `⚠️ <b>Amount exceeds remaining!</b>\n\nEntered: <b>${roundedAmt}</b> | Remaining: <b>${rem}</b> (Total: <b>${draft.amount}</b>)\n\nPlease reply with up to <b>${rem}</b>:\n\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
+                t.amountExceedsRemaining(draftLang, roundedAmt, rem, draft.amount, draftId),
                 {
                   parse_mode: "HTML",
                   reply_parameters: { message_id: ctx.message.message_id },
                   reply_markup: { force_reply: true, input_field_placeholder: `${rem}` }
                 }
               );
-              const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+              const kb = new InlineKeyboard().text(t.cancelBtn(draftLang), `canceldraft_${draftId}`);
               const errOpt = await ctx.reply(
-                `<i>Tap below to cancel:</i>\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
+                t.tapToCancel(draftLang, `split_step_${draftId}`),
                 { parse_mode: "HTML", reply_markup: kb }
               );
               draft.msgIds = Array.from(new Set([...(draft.msgIds || []), ctx.message.message_id, errPrompt.message_id, errOpt.message_id]));
@@ -1037,7 +1122,6 @@ export default {
           draft.msgIds = Array.from(new Set([...(draft.msgIds || []), replyTo.message_id, ctx.message.message_id]));
           draft.currentShareIndex = (draft.currentShareIndex || 0) + 1;
 
-          // Check if fixed total has been completely reached early
           if (!draft.isItemized && draft.amount > 0) {
             let totalAllocated = 0;
             for (let i = 0; i < draft.currentShareIndex; i++) {
@@ -1046,7 +1130,6 @@ export default {
             totalAllocated = Math.round(totalAllocated * 100) / 100;
 
             if (Math.abs(totalAllocated - draft.amount) <= 0.01) {
-              // Automatically set all remaining members' shares to 0
               for (let k = draft.currentShareIndex; k < draft.splitOrder.length; k++) {
                 const remUid = draft.splitOrder[k];
                 draft.shares[remUid] = 0;
@@ -1057,10 +1140,9 @@ export default {
 
           if (draft.currentShareIndex < draft.splitOrder.length) {
             await saveDraft(env.DB, draftId, draft);
-            return promptNextShare(ctx, env.DB, draftId, draft);
+            return promptNextShare(ctx, env.DB, draftId, draft, draftLang);
           }
 
-          // All members completed!
           const members = await getProjectMembers(env.DB, draft.projectId);
           const userShares: { userId: number; amount: number; name: string }[] = [];
           let totalSum = 0;
@@ -1076,7 +1158,7 @@ export default {
           if (draft.isItemized) {
             if (totalSum <= 0) {
               await deleteDraft(env.DB, draftId);
-              return ctx.reply("❌ Total expense amount is 0. Expense cancelled.");
+              return ctx.reply(t.totalZeroCancelled(draftLang));
             }
             draft.amount = totalSum;
           } else {
@@ -1084,18 +1166,18 @@ export default {
               await saveDraft(env.DB, draftId, draft);
               const diff = Math.round((draft.amount - totalSum) * 100) / 100;
               const kb = new InlineKeyboard()
-                .text(`✅ Set Total to ${totalSum}`, `exp_fixsum_${draftId}_${totalSum}`)
+                .text(t.setTotalToBtn(draftLang, totalSum), `exp_fixsum_${draftId}_${totalSum}`)
                 .row()
-                .text("🔄 Restart Shares", `expunequal_${draftId}`)
-                .text("❌ Cancel", `canceldraft_${draftId}`);
+                .text(t.restartSharesBtn(draftLang), `expunequal_${draftId}`)
+                .text(t.cancelBtn(draftLang), `canceldraft_${draftId}`);
               return ctx.reply(
-                `⚠️ <b>Total Mismatch</b>\n\nInputs sum to <b>${totalSum}</b>, but total was set to <b>${draft.amount}</b> (diff: <b>${diff > 0 ? "+" : ""}${diff}</b>).\n\nChoose an option below:`,
+                t.totalMismatch(draftLang, totalSum, draft.amount, diff),
                 { parse_mode: "HTML", reply_markup: kb }
               );
             }
           }
 
-          return finalizeUnequalExpense(ctx, env.DB, draftId, draft, userShares);
+          return finalizeUnequalExpense(ctx, env.DB, draftId, draft, userShares, draftLang);
         }
 
         return next();
@@ -1106,6 +1188,7 @@ export default {
       // ====================================================
 
       bot.callbackQuery(/^join_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const projectId = Number(ctx.match[1]);
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
         await env.DB.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, name) VALUES (?, ?, ?)").bind(projectId, ctx.from.id, ctx.from.first_name).run();
@@ -1113,24 +1196,25 @@ export default {
         const proj = await getProjectById(env.DB, projectId);
         if (proj) {
           const kb = new InlineKeyboard()
-            .text("✋ Join Project", cmdMsgId ? `join_${projectId}_${cmdMsgId}` : `join_${projectId}`)
-            .text("✅ Done Adding", cmdMsgId ? `join_done_${projectId}_${cmdMsgId}` : `join_done_${projectId}`);
+            .text(t.joinProjectBtn(lang), cmdMsgId ? `join_${projectId}_${cmdMsgId}` : `join_${projectId}`)
+            .text(t.doneAddingBtn(lang), cmdMsgId ? `join_done_${projectId}_${cmdMsgId}` : `join_done_${projectId}`);
           try {
             await ctx.editMessageText(
-              `🎉 Project <b>${escapeHtml(proj.name)}</b>${proj.currency ? ' (' + escapeHtml(proj.currency) + ')' : ''} created!\n\n👥 <b>Current Members:</b> ${members.map(m => escapeHtml(m.name)).join(", ")}\n\nTap <b>Join Project</b> below or reply with a name to add someone:\n\n<span class="tg-spoiler">[Action: project_join_${projectId}_${cmdMsgId}]</span>`,
+              t.projectCreated(lang, proj.name, proj.currency, members.map(m => escapeHtml(m.name)).join(", "), `project_join_${projectId}_${cmdMsgId}`),
               { parse_mode: "HTML", reply_markup: kb }
             );
           } catch (_) {}
         }
-        await ctx.answerCallbackQuery("Joined!").catch(() => {});
+        await ctx.answerCallbackQuery(t.joinedAlert(lang)).catch(() => {});
       });
 
       bot.callbackQuery(/^join_done_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         await ctx.answerCallbackQuery().catch(() => {});
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
-        const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        const kb = new InlineKeyboard().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         try {
-          await ctx.editMessageText("✅ Group locked. You can now log expenses with /add.", { reply_markup: kb });
+          await ctx.editMessageText(t.groupLocked(lang), { reply_markup: kb });
         } catch (_) {}
       });
 
@@ -1140,9 +1224,10 @@ export default {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        const lang = draft.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const currentMsgId = ctx.callbackQuery?.message?.message_id;
         const allMsgIds = Array.from(new Set([...(draft.msgIds || []), ...(currentMsgId ? [currentMsgId] : [])])).filter((id): id is number => typeof id === "number" && id > 0);
-        await createProjectAndFinish(ctx, draft.name, "", draftId, allMsgIds);
+        await createProjectAndFinish(ctx, draft.name, "", draftId, allMsgIds, lang);
       });
 
       bot.callbackQuery(/^add_skip_desc_([a-zA-Z0-9_]+)$/, async (ctx) => {
@@ -1150,6 +1235,7 @@ export default {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        const lang = draft.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const currentMsgId = ctx.callbackQuery?.message?.message_id;
         if (currentMsgId) {
           draft.msgIds = Array.from(new Set([...(draft.msgIds || []), currentMsgId]));
@@ -1157,14 +1243,15 @@ export default {
         draft.desc = new Date().toISOString().replace('T', ' ').substring(0, 16);
         draft.step = "payer";
         await saveDraft(env.DB, draftId, draft);
-        return startAddPayerFlow(ctx, draftId, draft);
+        return startAddPayerFlow(ctx, draftId, draft, lang);
       });
 
       bot.callbackQuery(/^add_itemized_(exp_.+)$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
-        if (!draft) return ctx.reply("❌ Session expired. Please run /add again.");
+        const lang = draft?.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        if (!draft) return ctx.reply(t.sessionExpired(lang));
 
         draft.isItemized = true;
         draft.amount = 0;
@@ -1176,10 +1263,10 @@ export default {
         await saveDraft(env.DB, draftId, draft);
 
         try {
-          await ctx.editMessageText("⚡ <b>Unequal Share Mode</b> (Total will be calculated from individual shares)", { parse_mode: "HTML" });
+          await ctx.editMessageText(t.unequalModeNotice(lang), { parse_mode: "HTML" });
         } catch (_) {}
 
-        return promptAddDescription(ctx, env.DB, draftId, draft);
+        return promptAddDescription(ctx, env.DB, draftId, draft, lang);
       });
 
       // --- ADD EXPENSE CALLBACKS ---
@@ -1188,9 +1275,10 @@ export default {
         const draftId = ctx.match[2];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        const lang = draft.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
         draft.projectId = Number(ctx.match[1]);
         await saveDraft(env.DB, draftId, draft);
-        await promptPayerSelection(ctx, env.DB, draftId, draft.projectId, draft.amount, draft.desc, draft.isItemized);
+        await promptPayerSelection(ctx, env.DB, draftId, draft.projectId, draft.amount, draft.desc, draft.isItemized, lang);
       });
 
       bot.callbackQuery(/^exppayer_(exp_.+)_(-?\d+)$/, async (ctx) => {
@@ -1198,17 +1286,18 @@ export default {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        const lang = draft.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
         draft.payerId = Number(ctx.match[2]);
         draft.splitWith = (await getProjectMembers(env.DB, draft.projectId)).map(m => m.user_id);
         await saveDraft(env.DB, draftId, draft);
-        await renderSplitSelection(ctx, env.DB, draftId, draft);
+        await renderSplitSelection(ctx, env.DB, draftId, draft, lang);
       });
 
-      async function promptPayerSelection(ctx: Context, db: D1Database, draftId: string, projId: number, amount: number, desc: string, isItemized: boolean = false) {
+      async function promptPayerSelection(ctx: Context, db: D1Database, draftId: string, projId: number, amount: number, desc: string, isItemized: boolean = false, lang: Language = "en") {
         const members = await getProjectMembers(db, projId);
         if (members.length === 0) {
-          const text = `❌ <b>No members in this project yet!</b>\nUse /new or tap Join Project first.`;
-          const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+          const text = t.noMembersInProject(lang, "");
+          const kb = new InlineKeyboard().text(t.cancelBtn(lang), `canceldraft_${draftId}`);
           if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
           else {
             const sent = await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
@@ -1226,10 +1315,10 @@ export default {
           if (i % 2 === 1) kb.row();
         }
         if (members.length % 2 !== 0) kb.row();
-        kb.text("❌ Cancel", `canceldraft_${draftId}`);
+        kb.text(t.cancelBtn(lang), `canceldraft_${draftId}`);
 
-        const amountLabel = isItemized ? "(⚡ Unequal Share)" : `(${amount})`;
-        const text = `🧾 <b>${escapeHtml(desc)}</b> ${amountLabel}\n👉 <b>Who paid?</b>`;
+        const amountLabel = isItemized ? (lang === 'fa' ? "(⚡ دانگ نامساوی)" : "(⚡ Unequal Share)") : `(${amount})`;
+        const text = t.promptPayer(lang, desc, amountLabel);
         if (ctx.callbackQuery) {
           await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
         } else {
@@ -1242,7 +1331,7 @@ export default {
         }
       }
 
-      async function renderSplitSelection(ctx: Context, db: D1Database, draftId: string, draft: any) {
+      async function renderSplitSelection(ctx: Context, db: D1Database, draftId: string, draft: any, lang: Language = "en") {
         const members = await getProjectMembers(db, draft.projectId);
         const kb = new InlineKeyboard();
         for (let i = 0; i < members.length; i++) {
@@ -1253,15 +1342,15 @@ export default {
         if (members.length % 2 !== 0) kb.row();
 
         if (draft.isItemized) {
-          kb.text("⚡ Enter Shares ➡️", `expunequal_${draftId}`).row();
+          kb.text(t.enterSharesBtn(lang), `expunequal_${draftId}`).row();
         } else {
-          kb.text("⚡ Unequal Split", `expunequal_${draftId}`).text("💾 Confirm Equal", `expconfirm_${draftId}`).row();
+          kb.text(t.unequalSplitBtn(lang), `expunequal_${draftId}`).text(t.confirmEqualBtn(lang), `expconfirm_${draftId}`).row();
         }
-        kb.text("❌ Cancel", `canceldraft_${draftId}`);
+        kb.text(t.cancelBtn(lang), `canceldraft_${draftId}`);
 
         const header = draft.isItemized
-          ? `🧾 <b>${escapeHtml(draft.desc)}</b> (⚡ Unequal Share)\n<i>Select who shares this expense, then enter individual shares:</i>`
-          : `🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n<i>Toggle who shares this equally, or choose Unequal:</i>`;
+          ? t.splitSelectHeaderUnequal(lang, draft.desc)
+          : t.splitSelectHeaderEqual(lang, draft.desc, draft.amount);
 
         if (ctx.callbackQuery) {
           await ctx.editMessageText(header, { parse_mode: "HTML", reply_markup: kb });
@@ -1277,22 +1366,24 @@ export default {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        const lang = draft.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const uid = Number(ctx.match[2]);
         draft.splitWith = draft.splitWith.includes(uid) ? draft.splitWith.filter((id: number) => id !== uid) : [...draft.splitWith, uid];
         await saveDraft(env.DB, draftId, draft);
-        await renderSplitSelection(ctx, env.DB, draftId, draft);
+        await renderSplitSelection(ctx, env.DB, draftId, draft, lang);
       });
 
       bot.callbackQuery(/^expconfirm_(exp_.+)$/, async (ctx) => {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        const lang = draft.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
         if (draft.isItemized || !draft.amount || draft.amount <= 0) {
-          await ctx.answerCallbackQuery("Please use Unequal Split to enter shares!").catch(() => {});
+          await ctx.answerCallbackQuery(t.useUnequalToEnterShares(lang)).catch(() => {});
           return;
         }
         if (!draft.splitWith || draft.splitWith.length === 0) {
-          await ctx.answerCallbackQuery("Select at least 1 person!").catch(() => {});
+          await ctx.answerCallbackQuery(t.selectAtLeastOne(lang)).catch(() => {});
           return;
         }
         await ctx.answerCallbackQuery().catch(() => {});
@@ -1304,11 +1395,10 @@ export default {
         const currentMsgId = ctx.callbackQuery?.message?.message_id;
         const toDelete = (draft.msgIds || []).filter((id: any): id is number => typeof id === "number" && id > 0 && id !== currentMsgId);
         const kb = new InlineKeyboard()
-          .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
-          .text("❌ Close", "closemsg");
-        await ctx.editMessageText(`✅ <b>Expense Saved!</b>\n🧾 <b>${escapeHtml(draft.desc)}</b> (${draft.amount})\n\n<i>Split equally between ${draft.splitWith.length} people.</i>`, { parse_mode: "HTML", reply_markup: kb });
+          .text(t.undoBtn(lang), `delexp_${exp.id}_${draft.projectId}`)
+          .text(t.closeBtn(lang), "closemsg");
+        await ctx.editMessageText(t.expenseSavedEqual(lang, draft.desc, draft.amount, draft.splitWith.length), { parse_mode: "HTML", reply_markup: kb });
 
-        // Delete previous messages of this flow after showing the last message
         if (ctx.chat && toDelete.length > 0) {
           await deleteMessages(ctx, ctx.chat.id, toDelete);
         }
@@ -1318,11 +1408,12 @@ export default {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        const lang = draft.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
 
         const members = await getProjectMembers(env.DB, draft.projectId);
         const activeMembers = members.filter(m => draft.splitWith.includes(m.user_id));
         if (activeMembers.length === 0) {
-          await ctx.answerCallbackQuery("Select at least 1 person!").catch(() => {});
+          await ctx.answerCallbackQuery(t.selectAtLeastOne(lang)).catch(() => {});
           return;
         }
         await ctx.answerCallbackQuery().catch(() => {});
@@ -1339,13 +1430,13 @@ export default {
         await saveDraft(env.DB, draftId, draft);
 
         try {
-          await ctx.editMessageText("⚡ <i>Entering unequal shares below...</i>", { parse_mode: "HTML" });
+          await ctx.editMessageText(t.enteringSharesBelow(lang), { parse_mode: "HTML" });
         } catch (_) {}
 
-        await promptNextShare(ctx, env.DB, draftId, draft);
+        await promptNextShare(ctx, env.DB, draftId, draft, lang);
       });
 
-      async function promptNextShare(ctx: Context, db: D1Database, draftId: string, draft: any) {
+      async function promptNextShare(ctx: Context, db: D1Database, draftId: string, draft: any, lang: Language = "en") {
         const members = await getProjectMembers(db, draft.projectId);
         const currentUserId = draft.splitOrder[draft.currentShareIndex];
         const member = members.find(m => m.user_id === currentUserId);
@@ -1366,31 +1457,36 @@ export default {
           if (i < draft.currentShareIndex) {
             progress += `\u200E• ${escapeHtml(name)}: <b>${draft.shares?.[uid] ?? 0}</b>\n`;
           } else if (i === draft.currentShareIndex) {
-            progress += `\u200E👉 <b>${escapeHtml(name)}:</b> <i>(awaiting reply...)</i>\n`;
+            progress += `\u200E👉 <b>${escapeHtml(name)}:</b> <i>(${lang === 'fa' ? 'در انتظار ورود سهم...' : 'awaiting reply...'})</i>\n`;
           } else {
             progress += `\u200E• ${escapeHtml(name)}: ⏳\n`;
           }
         }
 
         let status = "";
-        let placeholder = `Share for ${memberName.slice(0, 30)}`;
+        let placeholder = t.sharePlaceholder(lang, memberName);
         if (draft.isItemized) {
-          status = allocatedSum > 0 ? `\n💰 <b>Current Total:</b> ${allocatedSum}` : "";
+          status = allocatedSum > 0 ? (lang === 'fa' ? `\n💰 <b>مجموع فعلی:</b> ${allocatedSum}` : `\n💰 <b>Current Total:</b> ${allocatedSum}`) : "";
         } else {
           const remaining = Math.round((draft.amount - allocatedSum) * 100) / 100;
-          status = `\n💰 <b>Allocated:</b> ${allocatedSum} | <b>Remaining:</b> ${remaining} (Total: ${draft.amount})`;
+          status = lang === 'fa'
+            ? `\n💰 <b>ثبت‌شده:</b> ${allocatedSum} | <b>باقی‌مانده:</b> ${remaining} (کل: ${draft.amount})`
+            : `\n💰 <b>Allocated:</b> ${allocatedSum} | <b>Remaining:</b> ${remaining} (Total: ${draft.amount})`;
           if (draft.currentShareIndex === draft.splitOrder.length - 1 && remaining > 0) {
             placeholder = `${remaining}`;
           }
         }
 
-        const promptText = 
-          `⚡ <b>Unequal Split:</b> ${escapeHtml(draft.desc)}\n` +
-          `Step <b>${draft.currentShareIndex + 1}</b> of <b>${draft.splitOrder.length}</b>\n\n` +
-          progress +
-          status + `\n\n` +
-          `Reply with <b>${escapeHtml(memberName)}&#39;s share</b> (e.g. <code>2500</code> or <code>0</code>):\n\n` +
-          `<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`;
+        const promptText = t.promptNextShareMsg(
+          lang,
+          draft.desc,
+          draft.currentShareIndex + 1,
+          draft.splitOrder.length,
+          progress,
+          status,
+          memberName,
+          draftId
+        );
 
         const replyToId = ctx.message?.message_id || ctx.callbackQuery?.message?.message_id;
         const promptMsg = await ctx.reply(promptText, {
@@ -1401,12 +1497,13 @@ export default {
             input_field_placeholder: placeholder
           }
         });
-        const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+        const kb = new InlineKeyboard().text(t.cancelBtn(lang), `canceldraft_${draftId}`);
         const optMsg = await ctx.reply(
-          `<i>Tap below to cancel:</i>\n<span class="tg-spoiler">[Action: split_step_${draftId}]</span>`,
+          t.tapToCancel(lang, `split_step_${draftId}`),
           { parse_mode: "HTML", reply_markup: kb }
         );
         draft.msgIds = Array.from(new Set([...(draft.msgIds || []), promptMsg.message_id, optMsg.message_id]));
+        draft.lang = lang;
         await saveDraft(db, draftId, draft);
       }
 
@@ -1415,7 +1512,8 @@ export default {
         db: D1Database,
         draftId: string,
         draft: any,
-        userShares: { userId: number; amount: number; name: string }[]
+        userShares: { userId: number; amount: number; name: string }[],
+        lang: Language = "en"
       ) {
         const desc = draft.desc || new Date().toISOString().replace('T', ' ').substring(0, 16);
         const exp = await db.prepare(
@@ -1429,10 +1527,10 @@ export default {
         }
 
         const kb = new InlineKeyboard()
-          .text("↩️ Undo", `delexp_${exp.id}_${draft.projectId}`)
-          .text("❌ Close", "closemsg");
+          .text(t.undoBtn(lang), `delexp_${exp.id}_${draft.projectId}`)
+          .text(t.closeBtn(lang), "closemsg");
 
-        let reportMsg = `✅ <b>Expense Saved!</b>\n🧾 <b>${escapeHtml(desc)}</b> (${draft.amount})\n\n`;
+        let reportMsg = t.expenseSavedUnequalHeader(lang, desc, draft.amount);
         userShares.forEach(s => reportMsg += `\u200E• ${escapeHtml(s.name)}: <b>${s.amount}</b>\n`);
 
         await ctx.reply(reportMsg, { parse_mode: "HTML", reply_markup: kb });
@@ -1454,7 +1552,8 @@ export default {
         const draftId = ctx.match[1];
         const newTotal = Number(ctx.match[2]);
         const draft = await getDraft(env.DB, draftId);
-        if (!draft || !draft.splitOrder || !draft.shares) return ctx.reply("❌ Session expired.");
+        const lang = draft?.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        if (!draft || !draft.splitOrder || !draft.shares) return ctx.reply(t.sessionExpired(lang));
 
         draft.amount = newTotal;
         const members = await getProjectMembers(env.DB, draft.projectId);
@@ -1464,7 +1563,7 @@ export default {
           name: members.find(m => m.user_id === uid)?.name || "Unknown"
         }));
 
-        return finalizeUnequalExpense(ctx, env.DB, draftId, draft, userShares);
+        return finalizeUnequalExpense(ctx, env.DB, draftId, draft, userShares, lang);
       });
 
       // --- PAY CALLBACKS ---
@@ -1473,16 +1572,17 @@ export default {
         const draftId = ctx.match[2];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        const lang = draft.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
         draft.projectId = Number(ctx.match[1]);
         await saveDraft(env.DB, draftId, draft);
-        await promptPaySender(ctx, env.DB, draftId, draft.projectId, draft.amount);
+        await promptPaySender(ctx, env.DB, draftId, draft.projectId, draft.amount, lang);
       });
 
-      async function promptPaySender(ctx: Context, db: D1Database, draftId: string, projId: number, amount: number) {
+      async function promptPaySender(ctx: Context, db: D1Database, draftId: string, projId: number, amount: number, lang: Language = "en") {
         const members = await getProjectMembers(db, projId);
         if (members.length === 0) {
-          const text = `❌ <b>No members in this project yet!</b>`;
-          const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
+          const text = t.noMembersInProject(lang, "");
+          const kb = new InlineKeyboard().text(t.cancelBtn(lang), `canceldraft_${draftId}`);
           if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
           else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
           return;
@@ -1493,9 +1593,9 @@ export default {
           if (i % 2 === 1) kb.row();
         }
         if (members.length % 2 !== 0) kb.row();
-        kb.text("❌ Cancel", `canceldraft_${draftId}`);
+        kb.text(t.cancelBtn(lang), `canceldraft_${draftId}`);
 
-        const text = `💸 <b>Transfer of ${amount}</b>\n👉 <b>Who is paying? (Sender)</b>`;
+        const text = t.promptPaySender(lang, amount);
         if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
         else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
@@ -1505,13 +1605,14 @@ export default {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
+        const lang = draft.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
         draft.fromId = Number(ctx.match[2]);
         await saveDraft(env.DB, draftId, draft);
         const members = await getProjectMembers(env.DB, draft.projectId);
         const receivers = members.filter(m => m.user_id !== draft.fromId);
         if (receivers.length === 0) {
-          const kb = new InlineKeyboard().text("❌ Cancel", `canceldraft_${draftId}`);
-          await ctx.editMessageText(`❌ <b>No other members to transfer to!</b>`, { parse_mode: "HTML", reply_markup: kb });
+          const kb = new InlineKeyboard().text(t.cancelBtn(lang), `canceldraft_${draftId}`);
+          await ctx.editMessageText(t.noOtherMembersTransfer(lang), { parse_mode: "HTML", reply_markup: kb });
           return;
         }
         const kb = new InlineKeyboard();
@@ -1520,8 +1621,8 @@ export default {
           if (i % 2 === 1) kb.row();
         }
         if (receivers.length % 2 !== 0) kb.row();
-        kb.text("❌ Cancel", `canceldraft_${draftId}`);
-        await ctx.editMessageText(`💸 <b>Transfer of ${draft.amount}</b>\n👉 <b>Who is receiving?</b>`, { parse_mode: "HTML", reply_markup: kb });
+        kb.text(t.cancelBtn(lang), `canceldraft_${draftId}`);
+        await ctx.editMessageText(t.promptPayReceiver(lang, draft.amount), { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^payto_(pay_.+)_(-?\d+)$/, async (ctx) => {
@@ -1529,7 +1630,8 @@ export default {
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         if (!draft) return;
-        const t = await env.DB.prepare("INSERT INTO settlements (project_id, from_user_id, to_user_id, amount) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.fromId, Number(ctx.match[2]), draft.amount).first() as any;
+        const lang = draft.lang || await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        const tItem = await env.DB.prepare("INSERT INTO settlements (project_id, from_user_id, to_user_id, amount) VALUES (?, ?, ?, ?) RETURNING id").bind(draft.projectId, draft.fromId, Number(ctx.match[2]), draft.amount).first() as any;
         await deleteDraft(env.DB, draftId);
         const currentMsgId = ctx.callbackQuery?.message?.message_id;
         const toDelete = (draft.msgIds || []).filter((id: any): id is number => typeof id === "number" && id > 0 && id !== currentMsgId);
@@ -1543,11 +1645,10 @@ export default {
         const toName = toMem?.name || "Unknown";
 
         const kb = new InlineKeyboard()
-          .text("↩️ Undo", `delpay_${t.id}_${draft.projectId}`)
-          .text("❌ Close", "closemsg");
-        await ctx.editMessageText(`✅ <b>Payment Recorded!</b>\n\n\u200E💸 <b>${escapeHtml(fromName)}</b> to <b>${escapeHtml(toName)}</b>: <b>${draft.amount}${curr}</b>`, { parse_mode: "HTML", reply_markup: kb });
+          .text(t.undoBtn(lang), `delpay_${tItem.id}_${draft.projectId}`)
+          .text(t.closeBtn(lang), "closemsg");
+        await ctx.editMessageText(t.paymentRecorded(lang, fromName, toName, draft.amount, curr), { parse_mode: "HTML", reply_markup: kb });
 
-        // Delete original command and prompts at the end of the payment flow
         if (ctx.chat && toDelete.length > 0) {
           await deleteMessages(ctx, ctx.chat.id, toDelete);
         }
@@ -1555,36 +1656,39 @@ export default {
 
       // --- DELETE / UNDO HANDLERS ---
       bot.callbackQuery(/^delexp_(\d+)_(\d+)$/, async (ctx) => {
-        await ctx.answerCallbackQuery("Deleted!").catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        await ctx.answerCallbackQuery(t.txDeletedAlert(lang)).catch(() => {});
         const expId = Number(ctx.match[1]);
         await env.DB.prepare("DELETE FROM expense_splits WHERE expense_id = ?").bind(expId).run();
         await env.DB.prepare("DELETE FROM expenses WHERE id = ?").bind(expId).run();
-        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
-        await ctx.editMessageText("🗑️ <i>Expense deleted successfully.</i>", { parse_mode: "HTML", reply_markup: kb });
+        const kb = new InlineKeyboard().text(t.closeBtn(lang), "closemsg");
+        await ctx.editMessageText(t.expenseDeletedUndo(lang), { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^delpay_(\d+)_(\d+)$/, async (ctx) => {
-        await ctx.answerCallbackQuery("Deleted!").catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        await ctx.answerCallbackQuery(t.txDeletedAlert(lang)).catch(() => {});
         const payId = Number(ctx.match[1]);
         await env.DB.prepare("DELETE FROM settlements WHERE id = ?").bind(payId).run();
-        const kb = new InlineKeyboard().text("❌ Close", "closemsg");
-        await ctx.editMessageText("🗑️ <i>Payment deleted successfully.</i>", { parse_mode: "HTML", reply_markup: kb });
+        const kb = new InlineKeyboard().text(t.closeBtn(lang), "closemsg");
+        await ctx.editMessageText(t.paymentDeletedUndo(lang), { parse_mode: "HTML", reply_markup: kb });
       });
 
       // --- CALLBACKS FOR BALANCES, SETTLE, DELETE, REPORT & CLOSE ---
       bot.callbackQuery(/^selproj_bal_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
-        await showBalancesMenu(ctx, env.DB, Number(ctx.match[1]), cmdMsgId);
+        await showBalancesMenu(ctx, env.DB, Number(ctx.match[1]), cmdMsgId, lang);
       });
 
-      async function showBalancesMenu(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0) {
+      async function showBalancesMenu(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0, lang: Language = "en") {
         const members = await getProjectMembers(db, projId);
         const proj = await getProjectById(db, projId);
         if (!proj) return;
         if (members.length === 0) {
-          const text = `📊 <b>Balances for ${escapeHtml(proj.name)}:</b>\nNo members in this project yet.`;
-          const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          const text = t.noMembersInProject(lang, proj.name);
+          const kb = new InlineKeyboard().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
           else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
           return;
@@ -1596,15 +1700,16 @@ export default {
           if (i % 2 === 1) kb.row();
         }
         if (members.length % 2 !== 0) kb.row();
-        kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        kb.text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
-        const text = `📊 <b>Balances for ${escapeHtml(proj.name)}:</b>\nTap a member below to see their detailed breakdown:`;
+        const text = t.balancesMenuTitle(lang, proj.name);
         if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
         else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
 
       bot.callbackQuery(/^baluser_(\d+)_(-?\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const projId = Number(ctx.match[1]);
         const userId = Number(ctx.match[2]);
         const cmdMsgId = ctx.match[3] ? Number(ctx.match[3]) : 0;
@@ -1616,26 +1721,25 @@ export default {
         
         let msg = `👤 <b>${escapeHtml(myName)}</b> — ${escapeHtml(proj.name)}\n\n`;
         const transactions = getSettlementTransactions(netBalances);
-        const myDebts = transactions.filter(t => t.from === userId);
-        const myCredits = transactions.filter(t => t.to === userId);
+        const myDebts = transactions.filter(tr => tr.from === userId);
+        const myCredits = transactions.filter(tr => tr.to === userId);
 
         if (myDebts.length > 0 || myCredits.length > 0) {
-          msg += `🧾 <b>Debts & Credits:</b>\n`;
-          myDebts.forEach(d => msg += `\u200E🔴 Owes <b>${d.amount.toFixed(2)}</b> to ${escapeHtml(names[d.to] || 'Unknown')}\n`);
-          myCredits.forEach(c => msg += `\u200E🟢 Gets <b>${c.amount.toFixed(2)}</b> from ${escapeHtml(names[c.from] || 'Unknown')}\n`);
+          msg += t.debtsSectionTitle(lang);
+          myDebts.forEach(d => msg += t.debtLine(lang, `${d.amount.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`, names[d.to] || 'Unknown'));
+          myCredits.forEach(c => msg += t.creditLine(lang, `${c.amount.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`, names[c.from] || 'Unknown'));
           msg += `\n`;
         } else {
-          msg += `✅ <b>No pending debts!</b>\n\n`;
+          msg += t.noPendingDebts(lang);
         }
 
-        msg += `💰 <b>Total Paid:</b> ${totalPaid[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
-        msg += `🍽️ <b>Total Share:</b> ${totalShare[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
+        msg += t.totalPaidLine(lang, `${totalPaid[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`);
+        msg += t.totalShareLine(lang, `${totalShare[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`);
         msg += `------------------------------------\n`;
-        if (myBal > 0.01) msg += `🟢 <b>Net:</b> Gets back <b>+${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}</b>`;
-        else if (myBal < -0.01) msg += `🔴 <b>Net:</b> Owes <b>${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}</b>`;
-        else msg += `⚪ <b>Net:</b> Settled ($0.00)`;
+        if (myBal > 0.01) msg += t.netGetsBack(lang, `${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`);
+        else if (myBal < -0.01) msg += t.netOwes(lang, `${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`);
+        else msg += t.netSettled(lang);
 
-        // Check if member has 0 involvement in this project
         const expPaidRow = await env.DB.prepare("SELECT COUNT(*) as count FROM expenses WHERE project_id = ? AND payer_id = ?").bind(projId, userId).first() as any;
         const expSplitRow = await env.DB.prepare("SELECT COUNT(*) as count FROM expense_splits es JOIN expenses e ON es.expense_id = e.id WHERE e.project_id = ? AND es.user_id = ?").bind(projId, userId).first() as any;
         const setlRow = await env.DB.prepare("SELECT COUNT(*) as count FROM settlements WHERE project_id = ? AND (from_user_id = ? OR to_user_id = ?)").bind(projId, userId, userId).first() as any;
@@ -1643,21 +1747,22 @@ export default {
         const isNotInvolved = (expPaidRow?.count || 0) === 0 && (expSplitRow?.count || 0) === 0 && (setlRow?.count || 0) === 0;
 
         if (isNotInvolved) {
-          msg += `\n\nℹ️ <i>This member has not participated in any expenses or transfers yet.</i>`;
+          msg += t.memberNotInvolvedNote(lang);
         }
 
         const backData = cmdMsgId ? `selproj_bal_${projId}_${cmdMsgId}` : `selproj_bal_${projId}`;
-        const kb = new InlineKeyboard().text("« Back to Members", backData);
+        const kb = new InlineKeyboard().text(t.backToMembersBtn(lang), backData);
         if (isNotInvolved && proj.status === 'active') {
           const rmData = cmdMsgId ? `askrm_mem_${projId}_${userId}_${cmdMsgId}` : `askrm_mem_${projId}_${userId}`;
-          kb.text("🚫 Remove Member", rmData);
+          kb.text(t.removeMemberBtn(lang), rmData);
         }
-        kb.row().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        kb.row().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^askrm_mem_(\d+)_(-?\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const projId = Number(ctx.match[1]);
         const userId = Number(ctx.match[2]);
         const cmdMsgId = ctx.match[3] ? Number(ctx.match[3]) : 0;
@@ -1672,21 +1777,19 @@ export default {
         const cfmData = cmdMsgId ? `cfmrm_mem_${projId}_${userId}_${cmdMsgId}` : `cfmrm_mem_${projId}_${userId}`;
         const cancelData = cmdMsgId ? `baluser_${projId}_${userId}_${cmdMsgId}` : `baluser_${projId}_${userId}`;
 
-        const confirmText =
-          `⚠️ <b>Remove Member from Project?</b>\n\n` +
-          `Are you sure you want to remove <b>${escapeHtml(memberName)}</b> from <b>${escapeHtml(proj.name)}</b>?\n\n` +
-          `<i>ℹ️ This member has no recorded expenses or payments and will be removed from the project list.</i>`;
+        const confirmText = t.askRemoveMember(lang, memberName, proj.name);
 
         const kb = new InlineKeyboard()
-          .text("🚫 Yes, Remove", cfmData)
-          .text("« Cancel", cancelData)
+          .text(t.yesRemoveMemberBtn(lang), cfmData)
+          .text(t.cancelBtn(lang), cancelData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
         await ctx.editMessageText(confirmText, { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^cfmrm_mem_(\d+)_(-?\d+)(?:_(\d+))?$/, async (ctx) => {
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const projId = Number(ctx.match[1]);
         const userId = Number(ctx.match[2]);
         const cmdMsgId = ctx.match[3] ? Number(ctx.match[3]) : 0;
@@ -1694,17 +1797,16 @@ export default {
         const proj = await getProjectById(env.DB, projId);
         if (!proj) return;
 
-        // Double check they have no transactions
         const expPaidRow = await env.DB.prepare("SELECT COUNT(*) as count FROM expenses WHERE project_id = ? AND payer_id = ?").bind(projId, userId).first() as any;
         const expSplitRow = await env.DB.prepare("SELECT COUNT(*) as count FROM expense_splits es JOIN expenses e ON es.expense_id = e.id WHERE e.project_id = ? AND es.user_id = ?").bind(projId, userId).first() as any;
         const setlRow = await env.DB.prepare("SELECT COUNT(*) as count FROM settlements WHERE project_id = ? AND (from_user_id = ? OR to_user_id = ?)").bind(projId, userId, userId).first() as any;
 
         const isNotInvolved = (expPaidRow?.count || 0) === 0 && (expSplitRow?.count || 0) === 0 && (setlRow?.count || 0) === 0;
         if (!isNotInvolved) {
-          await ctx.answerCallbackQuery("Cannot remove: member has recorded transactions!").catch(() => {});
+          await ctx.answerCallbackQuery(t.cannotRemoveHasTx(lang)).catch(() => {});
           const backData = cmdMsgId ? `baluser_${projId}_${userId}_${cmdMsgId}` : `baluser_${projId}_${userId}`;
-          const kb = new InlineKeyboard().text("« Back", backData);
-          return ctx.editMessageText("❌ <b>Cannot remove member:</b>\nThis member has recorded expenses or transfers and cannot be removed.", { parse_mode: "HTML", reply_markup: kb });
+          const kb = new InlineKeyboard().text(t.backBtn(lang), backData);
+          return ctx.editMessageText(t.cannotRemoveHasTxBody(lang), { parse_mode: "HTML", reply_markup: kb });
         }
 
         const members = await getProjectMembers(env.DB, projId);
@@ -1712,32 +1814,33 @@ export default {
         const memberName = member?.name || "Member";
 
         await env.DB.prepare("DELETE FROM project_members WHERE project_id = ? AND user_id = ?").bind(projId, userId).run();
-        await ctx.answerCallbackQuery("Member removed from project!").catch(() => {});
+        await ctx.answerCallbackQuery(t.memberRemovedAlert(lang)).catch(() => {});
 
         const backData = cmdMsgId ? `selproj_bal_${projId}_${cmdMsgId}` : `selproj_bal_${projId}`;
         const kb = new InlineKeyboard()
-          .text("« Back to Members", backData)
+          .text(t.backToMembersBtn(lang), backData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
-        await ctx.editMessageText(`✅ <i>Member <b>${escapeHtml(memberName)}</b> was successfully removed from ${escapeHtml(proj.name)}.</i>`, { parse_mode: "HTML", reply_markup: kb });
+        await ctx.editMessageText(t.memberRemovedSuccess(lang, memberName, proj.name), { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^selproj_settle_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
-        await showSettlement(ctx, env.DB, Number(ctx.match[1]), cmdMsgId);
+        await showSettlement(ctx, env.DB, Number(ctx.match[1]), cmdMsgId, lang);
       });
 
-      async function showSettlement(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0) {
+      async function showSettlement(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0, lang: Language = "en") {
         const proj = await getProjectById(db, projId);
         if (!proj) return;
         const { netBalances, names } = await calculateBalances(db, projId);
-        const steps = solveSettlement(netBalances, names, proj.currency);
-        let report = `⚖️ <b>Settlement Plan — ${escapeHtml(proj.name)}:</b>\n\n`;
-        if (steps.length === 0) report += "✅ <b>All settled up!</b> Everyone has zero balance.";
-        else report += steps.join("\n") + "\n\n<i>Tip: Use /pay to record transfers.</i>";
-        const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        const steps = solveSettlement(netBalances, names, proj.currency, lang);
+        let report = t.settlePlanTitle(lang, proj.name);
+        if (steps.length === 0) report += t.allSettledUp(lang);
+        else report += steps.join("\n") + t.settleTip(lang);
+        const kb = new InlineKeyboard().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         if (ctx.callbackQuery) await ctx.editMessageText(report, { parse_mode: "HTML", reply_markup: kb });
         else await ctx.reply(report, { parse_mode: "HTML", reply_markup: kb });
       }
@@ -1745,29 +1848,32 @@ export default {
       // --- TRANSACTIONS HANDLERS ---
       bot.callbackQuery(/^selproj_tx_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
-        await showTransactionsMenu(ctx, env.DB, Number(ctx.match[1]), 1, cmdMsgId);
+        await showTransactionsMenu(ctx, env.DB, Number(ctx.match[1]), 1, cmdMsgId, lang);
       });
 
       bot.callbackQuery(/^selproj_delete_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
-        await showTransactionsMenu(ctx, env.DB, Number(ctx.match[1]), 1, cmdMsgId);
+        await showTransactionsMenu(ctx, env.DB, Number(ctx.match[1]), 1, cmdMsgId, lang);
       });
 
       bot.callbackQuery(/^txpage_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const projId = Number(ctx.match[1]);
         const page = Number(ctx.match[2]);
         const cmdMsgId = ctx.match[3] ? Number(ctx.match[3]) : 0;
-        await showTransactionsMenu(ctx, env.DB, projId, page, cmdMsgId);
+        await showTransactionsMenu(ctx, env.DB, projId, page, cmdMsgId, lang);
       });
 
       bot.callbackQuery(/^tx_noop$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
       });
 
-      async function showTransactionsMenu(ctx: Context, db: D1Database, projId: number, page: number = 1, cmdMsgId: number = 0) {
+      async function showTransactionsMenu(ctx: Context, db: D1Database, projId: number, page: number = 1, cmdMsgId: number = 0, lang: Language = "en") {
         const proj = await getProjectById(db, projId);
         if (!proj) return;
         const members = await getProjectMembers(db, projId);
@@ -1792,7 +1898,8 @@ export default {
         const list: TxItem[] = [];
 
         for (const e of (exps as any[])) {
-          const desc = e.description ? (e.description.length > 18 ? e.description.slice(0, 18) + "…" : e.description) : "Expense";
+          const fallbackDesc = lang === "fa" ? "هزینه" : "Expense";
+          const desc = e.description ? (e.description.length > 18 ? e.description.slice(0, 18) + "…" : e.description) : fallbackDesc;
           list.push({
             type: "exp",
             id: e.id,
@@ -1807,16 +1914,16 @@ export default {
           const toName = memberMap.get(s.to_user_id) || "Unknown";
           const shortFrom = fromName.length > 8 ? fromName.slice(0, 8) + "…" : fromName;
           const shortTo = toName.length > 8 ? toName.slice(0, 8) + "…" : toName;
+          const toWord = lang === "fa" ? "به" : "to";
           list.push({
             type: "pay",
             id: s.id,
             amount: s.amount,
             createdAt: s.created_at || "",
-            label: `\u200E💸 ${shortFrom} to ${shortTo} (${s.amount}${proj.currency ? ' ' + proj.currency : ''})`
+            label: `\u200E💸 ${shortFrom} ${toWord} ${shortTo} (${s.amount}${proj.currency ? ' ' + proj.currency : ''})`
           });
         }
 
-        // Sort newest first by created_at or id
         list.sort((a, b) => {
           if (a.createdAt && b.createdAt && a.createdAt !== b.createdAt) {
             return b.createdAt.localeCompare(a.createdAt);
@@ -1827,8 +1934,8 @@ export default {
         const kb = new InlineKeyboard();
 
         if (list.length === 0) {
-          const text = `🧾 <b>Transactions — ${escapeHtml(proj.name)}:</b>\n\n<i>No transactions recorded yet.</i>`;
-          kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          const text = t.noTransactionsYet(lang, proj.name);
+          kb.text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
           else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
           return;
@@ -1853,27 +1960,28 @@ export default {
             const prevData = cmdMsgId
               ? `txpage_${projId}_${currentPage - 1}_${cmdMsgId}`
               : `txpage_${projId}_${currentPage - 1}`;
-            kb.text("⬅️ Prev", prevData);
+            kb.text(t.prevPageBtn(lang), prevData);
           }
           kb.text(`📄 ${currentPage}/${totalPages}`, "tx_noop");
           if (currentPage < totalPages) {
             const nextData = cmdMsgId
               ? `txpage_${projId}_${currentPage + 1}_${cmdMsgId}`
               : `txpage_${projId}_${currentPage + 1}`;
-            kb.text("Next ➡️", nextData);
+            kb.text(t.nextPageBtn(lang), nextData);
           }
           kb.row();
         }
 
-        kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        kb.text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
-        const text = `🧾 <b>Transactions — ${escapeHtml(proj.name)}</b> (Page ${currentPage}/${totalPages}):\nTap a transaction to view details or delete:`;
+        const text = t.txMenuTitle(lang, proj.name, currentPage, totalPages);
         if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
         else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
       }
 
       bot.callbackQuery(/^tx_exp_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const expId = Number(ctx.match[1]);
         const projId = Number(ctx.match[2]);
         const page = Number(ctx.match[3]);
@@ -1886,8 +1994,8 @@ export default {
         const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
 
         if (!exp) {
-          const kb = new InlineKeyboard().text("« Back to Transactions", backData).row().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-          return ctx.editMessageText("❌ <i>This expense was already deleted or not found.</i>", { parse_mode: "HTML", reply_markup: kb });
+          const kb = new InlineKeyboard().text(t.backToTransactionsBtn(lang), backData).row().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          return ctx.editMessageText(t.expenseNotFound(lang), { parse_mode: "HTML", reply_markup: kb });
         }
 
         const members = await getProjectMembers(env.DB, projId);
@@ -1898,17 +2006,11 @@ export default {
           "SELECT user_id, share_amount FROM expense_splits WHERE expense_id = ?"
         ).bind(expId).all();
 
-        let msg = `🧾 <b>Expense Details</b>\n\n`;
-        msg += `🏷️ <b>Description:</b> ${escapeHtml(exp.description)}\n`;
-        msg += `👤 <b>Paid by:</b> ${escapeHtml(payerName)}\n`;
-        msg += `💰 <b>Full Amount:</b> ${exp.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
-        if (exp.created_at) {
-          msg += `📅 <b>Date:</b> <code>${escapeHtml(exp.created_at)}</code>\n`;
-        }
+        const amtStr = `${exp.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`;
+        let msg = t.txExpenseDetails(lang, exp.description, payerName, amtStr, exp.created_at || "");
 
-        msg += `\n👥 <b>Member Shares:</b>\n`;
         if (!splits || splits.length === 0) {
-          msg += `<i>Equal split amongst all members.</i>\n`;
+          msg += lang === 'fa' ? `<i>تقسیم مساوی بین تمامی اعضا.</i>\n` : `<i>Equal split amongst all members.</i>\n`;
         } else {
           for (const s of (splits as any[])) {
             const m = members.find(mem => mem.user_id === s.user_id);
@@ -1919,16 +2021,17 @@ export default {
 
         const askDelData = cmdMsgId ? `tx_askdel_exp_${exp.id}_${projId}_${page}_${cmdMsgId}` : `tx_askdel_exp_${exp.id}_${projId}_${page}`;
         const kb = new InlineKeyboard()
-          .text("« Back", backData)
-          .text("🗑️ Delete", askDelData)
+          .text(t.backBtn(lang), backData)
+          .text(t.deleteBtn(lang), askDelData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
         await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^tx_pay_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const payId = Number(ctx.match[1]);
         const projId = Number(ctx.match[2]);
         const page = Number(ctx.match[3]);
@@ -1941,8 +2044,8 @@ export default {
         const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
 
         if (!pay) {
-          const kb = new InlineKeyboard().text("« Back to Transactions", backData).row().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-          return ctx.editMessageText("❌ <i>This payment was already deleted or not found.</i>", { parse_mode: "HTML", reply_markup: kb });
+          const kb = new InlineKeyboard().text(t.backToTransactionsBtn(lang), backData).row().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          return ctx.editMessageText(t.paymentNotFound(lang), { parse_mode: "HTML", reply_markup: kb });
         }
 
         const members = await getProjectMembers(env.DB, projId);
@@ -1951,26 +2054,22 @@ export default {
         const senderName = sender?.name || "Unknown";
         const receiverName = receiver?.name || "Unknown";
 
-        let msg = `💸 <b>Payment Details</b>\n\n`;
-        msg += `\u200E👤 <b>Sender:</b> ${escapeHtml(senderName)}\n`;
-        msg += `\u200E👉 <b>Receiver:</b> ${escapeHtml(receiverName)}\n`;
-        msg += `💰 <b>Amount:</b> ${pay.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
-        if (pay.created_at) {
-          msg += `📅 <b>Date:</b> <code>${escapeHtml(pay.created_at)}</code>\n`;
-        }
+        const amtStr = `${pay.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`;
+        const msg = t.txPaymentDetails(lang, senderName, receiverName, amtStr, pay.created_at || "");
 
         const askDelData = cmdMsgId ? `tx_askdel_pay_${pay.id}_${projId}_${page}_${cmdMsgId}` : `tx_askdel_pay_${pay.id}_${projId}_${page}`;
         const kb = new InlineKeyboard()
-          .text("« Back", backData)
-          .text("🗑️ Delete", askDelData)
+          .text(t.backBtn(lang), backData)
+          .text(t.deleteBtn(lang), askDelData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
         await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^tx_askdel_exp_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const expId = Number(ctx.match[1]);
         const projId = Number(ctx.match[2]);
         const page = Number(ctx.match[3]);
@@ -1984,27 +2083,26 @@ export default {
 
         if (!exp) {
           const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
-          const kb = new InlineKeyboard().text("« Back to Transactions", backData).row().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-          return ctx.editMessageText("❌ <i>This expense was already deleted or not found.</i>", { parse_mode: "HTML", reply_markup: kb });
+          const kb = new InlineKeyboard().text(t.backToTransactionsBtn(lang), backData).row().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          return ctx.editMessageText(t.expenseNotFound(lang), { parse_mode: "HTML", reply_markup: kb });
         }
 
         const cfmData = cmdMsgId ? `tx_cfmdel_exp_${expId}_${projId}_${page}_${cmdMsgId}` : `tx_cfmdel_exp_${expId}_${projId}_${page}`;
         const kb = new InlineKeyboard()
-          .text("🗑️ Yes, Delete", cfmData)
-          .text("« Cancel", detailData)
+          .text(t.yesDeleteBtn(lang), cfmData)
+          .text(t.cancelBtn(lang), detailData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
-        const confirmMsg = `⚠️ <b>Delete Expense?</b>\n\n` +
-          `Are you sure you want to permanently delete:\n` +
-          `🧾 <b>${escapeHtml(exp.description)}</b> (${exp.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''})\n\n` +
-          `<i>⚠️ This action cannot be undone. Balances will be recalculated.</i>`;
+        const amtStr = `${exp.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`;
+        const confirmMsg = t.askDeleteExpense(lang, exp.description, amtStr);
 
         await ctx.editMessageText(confirmMsg, { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^tx_askdel_pay_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const payId = Number(ctx.match[1]);
         const projId = Number(ctx.match[2]);
         const page = Number(ctx.match[3]);
@@ -2018,8 +2116,8 @@ export default {
 
         if (!pay) {
           const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
-          const kb = new InlineKeyboard().text("« Back to Transactions", backData).row().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-          return ctx.editMessageText("❌ <i>This payment was already deleted or not found.</i>", { parse_mode: "HTML", reply_markup: kb });
+          const kb = new InlineKeyboard().text(t.backToTransactionsBtn(lang), backData).row().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          return ctx.editMessageText(t.paymentNotFound(lang), { parse_mode: "HTML", reply_markup: kb });
         }
 
         const members = await getProjectMembers(env.DB, projId);
@@ -2030,21 +2128,20 @@ export default {
 
         const cfmData = cmdMsgId ? `tx_cfmdel_pay_${payId}_${projId}_${page}_${cmdMsgId}` : `tx_cfmdel_pay_${payId}_${projId}_${page}`;
         const kb = new InlineKeyboard()
-          .text("🗑️ Yes, Delete", cfmData)
-          .text("« Cancel", detailData)
+          .text(t.yesDeleteBtn(lang), cfmData)
+          .text(t.cancelBtn(lang), detailData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
-        const confirmMsg = `⚠️ <b>Delete Payment?</b>\n\n` +
-          `Are you sure you want to permanently delete:\n` +
-          `\u200E💸 <b>${escapeHtml(senderName)}</b> to <b>${escapeHtml(receiverName)}</b> (${pay.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''})\n\n` +
-          `<i>⚠️ This action cannot be undone. Balances will be recalculated.</i>`;
+        const amtStr = `${pay.amount}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`;
+        const confirmMsg = t.askDeletePayment(lang, senderName, receiverName, amtStr);
 
         await ctx.editMessageText(confirmMsg, { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^tx_cfmdel_exp_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
-        await ctx.answerCallbackQuery("Transaction permanently deleted!").catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        await ctx.answerCallbackQuery(t.txDeletedAlert(lang)).catch(() => {});
         const expId = Number(ctx.match[1]);
         const projId = Number(ctx.match[2]);
         const page = Number(ctx.match[3]);
@@ -2055,15 +2152,16 @@ export default {
 
         const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
         const kb = new InlineKeyboard()
-          .text("« Back to Transactions", backData)
+          .text(t.backToTransactionsBtn(lang), backData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
-        await ctx.editMessageText("🗑️ <i>Expense deleted permanently.</i>", { parse_mode: "HTML", reply_markup: kb });
+        await ctx.editMessageText(t.expenseDeletedPermanently(lang), { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^tx_cfmdel_pay_(\d+)_(\d+)_(\d+)(?:_(\d+))?$/, async (ctx) => {
-        await ctx.answerCallbackQuery("Payment permanently deleted!").catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        await ctx.answerCallbackQuery(t.txDeletedAlert(lang)).catch(() => {});
         const payId = Number(ctx.match[1]);
         const projId = Number(ctx.match[2]);
         const page = Number(ctx.match[3]);
@@ -2073,55 +2171,58 @@ export default {
 
         const backData = cmdMsgId ? `txpage_${projId}_${page}_${cmdMsgId}` : `txpage_${projId}_${page}`;
         const kb = new InlineKeyboard()
-          .text("« Back to Transactions", backData)
+          .text(t.backToTransactionsBtn(lang), backData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
-        await ctx.editMessageText("🗑️ <i>Payment deleted permanently.</i>", { parse_mode: "HTML", reply_markup: kb });
+        await ctx.editMessageText(t.paymentDeletedPermanently(lang), { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^selproj_report_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
-        await showReport(ctx, env.DB, Number(ctx.match[1]), cmdMsgId);
+        await showReport(ctx, env.DB, Number(ctx.match[1]), cmdMsgId, lang);
       });
 
-      async function showReport(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0) {
+      async function showReport(ctx: Context, db: D1Database, projId: number, cmdMsgId: number = 0, lang: Language = "en") {
         const proj = await getProjectById(db, projId);
         if (!proj) return;
-        const { netBalances, names, totalPaid, members } = await calculateBalances(db, projId);
+        const { netBalances, totalPaid, members } = await calculateBalances(db, projId);
 
         const expSumRow = await db.prepare("SELECT SUM(amount) as total, COUNT(id) as count FROM expenses WHERE project_id = ?").bind(projId).first() as any;
         const totalExp = expSumRow?.total || 0;
         const countExp = expSumRow?.count || 0;
 
-        let msg = `📈 <b>Report — ${escapeHtml(proj.name)}</b> (${escapeHtml(proj.status.toUpperCase())})\n\n`;
-        msg += `💵 <b>Total Expenses:</b> ${totalExp.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''} (${countExp} entries)\n\n`;
-        msg += `👥 <b>Member Summary:</b>\n`;
+        const totalStr = `${totalExp.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`;
+        let msg = t.reportHeader(lang, proj.name, proj.status.toUpperCase(), totalStr, countExp);
         
         for (const m of members) {
           const paid = totalPaid[m.user_id] || 0;
           const bal = netBalances[m.user_id] || 0;
-          msg += `\u200E• <b>${escapeHtml(m.name)}:</b> Paid ${paid.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''} | Net: ${bal >= 0 ? "+" : ""}${bal.toFixed(2)}\n`;
+          const paidStr = `${paid.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`;
+          const balStr = `${bal >= 0 ? "+" : ""}${bal.toFixed(2)}`;
+          msg += t.reportMemberLine(lang, m.name, paidStr, balStr);
         }
 
         const kb = new InlineKeyboard();
         const balData = cmdMsgId ? `selproj_bal_${projId}_${cmdMsgId}` : `selproj_bal_${projId}`;
-        kb.text("👥 View Members", balData);
+        kb.text(t.viewMembersBtn(lang), balData);
         if (proj.status === "ended") {
           const askDelData = cmdMsgId ? `askdel_proj_${projId}_${cmdMsgId}` : `askdel_proj_${projId}`;
-          kb.text("🗑️ Delete Project", askDelData).row();
+          kb.text(t.deleteProjectBtn(lang), askDelData).row();
         } else {
           const closeData = cmdMsgId ? `closeproj_${projId}_${cmdMsgId}` : `closeproj_${projId}`;
-          kb.text("🔒 Close Project", closeData).row();
+          kb.text(t.closeProjectBtn(lang), closeData).row();
         }
-        kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        kb.text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         if (ctx.callbackQuery) await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
         else await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
       }
 
       bot.callbackQuery(/^askdel_proj_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const projId = Number(ctx.match[1]);
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
 
@@ -2133,42 +2234,40 @@ export default {
           ? `pv_proj_${projId}`
           : (cmdMsgId ? `selproj_report_${projId}_${cmdMsgId}` : `selproj_report_${projId}`);
 
-        const confirmText =
-          `⚠️ <b>Delete Project?</b>\n\n` +
-          `Are you sure you want to permanently delete project <b>${escapeHtml(proj.name)}</b>?\n\n` +
-          `<i>⚠️ This will permanently erase the project and all its history, expenses, and payments. This action cannot be undone!</i>`;
+        const confirmText = t.askDeleteProject(lang, proj.name);
 
         const kb = new InlineKeyboard()
-          .text("🗑️ Yes, Delete Project", cfmData)
-          .text("« Cancel", cancelData)
+          .text(t.yesDeleteProjectBtn(lang), cfmData)
+          .text(t.cancelBtn(lang), cancelData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
 
         await ctx.editMessageText(confirmText, { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^cfmdel_proj_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const projId = Number(ctx.match[1]);
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
 
         const proj = await getProjectById(env.DB, projId);
         if (!proj) return;
 
-        // Delete all related records
         await env.DB.prepare("DELETE FROM expense_splits WHERE expense_id IN (SELECT id FROM expenses WHERE project_id = ?)").bind(projId).run();
         await env.DB.prepare("DELETE FROM expenses WHERE project_id = ?").bind(projId).run();
         await env.DB.prepare("DELETE FROM settlements WHERE project_id = ?").bind(projId).run();
         await env.DB.prepare("DELETE FROM project_members WHERE project_id = ?").bind(projId).run();
         await env.DB.prepare("DELETE FROM projects WHERE id = ?").bind(projId).run();
 
-        await ctx.answerCallbackQuery("Project permanently deleted!").catch(() => {});
+        await ctx.answerCallbackQuery(t.projectDeletedAlert(lang)).catch(() => {});
 
-        const kb = new InlineKeyboard().text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-        await ctx.editMessageText(`🗑️ <i>Project <b>${escapeHtml(proj.name)}</b> has been permanently deleted.</i>`, { parse_mode: "HTML", reply_markup: kb });
+        const kb = new InlineKeyboard().text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        await ctx.editMessageText(t.projectDeletedSuccess(lang, proj.name), { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^closeproj_(\d+)(?:_(\d+))?$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
         const projId = Number(ctx.match[1]);
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
         const proj = await getProjectById(env.DB, projId);
@@ -2183,29 +2282,27 @@ export default {
         if (unsettled) {
           const cfmData = cmdMsgId ? `cfmclose_proj_${projId}_${cmdMsgId}` : `cfmclose_proj_${projId}`;
           const kb = new InlineKeyboard()
-            .text("🔒 Yes, Close Anyway", cfmData)
-            .text("« Cancel", backData)
+            .text(t.yesCloseAnywayBtn(lang), cfmData)
+            .text(t.cancelBtn(lang), backData)
             .row()
-            .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+            .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           return ctx.editMessageText(
-            `⚠️ <b>Close Project with Unsettled Debts?</b>\n\n` +
-            `Project <b>${escapeHtml(proj.name)}</b> still has pending debts!\n\n` +
-            `Are you sure you want to close and archive it?\n\n` +
-            `<i>ℹ️ You can still view its report or delete it anytime from /projects.</i>`,
+            t.askCloseUnsettled(lang, proj.name),
             { parse_mode: "HTML", reply_markup: kb }
           );
         }
 
         await env.DB.prepare("UPDATE projects SET status = 'ended' WHERE id = ?").bind(projId).run();
         const kb = new InlineKeyboard()
-          .text("« Back to Project", backData)
+          .text(t.backToProjectBtn(lang), backData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-        await ctx.editMessageText(`🔒 <b>Project ${escapeHtml(proj.name)} is now closed and archived.</b>`, { parse_mode: "HTML", reply_markup: kb });
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        await ctx.editMessageText(t.projectClosedSuccess(lang, proj.name), { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery(/^cfmclose_proj_(\d+)(?:_(\d+))?$/, async (ctx) => {
-        await ctx.answerCallbackQuery("Project closed!").catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        await ctx.answerCallbackQuery(t.projectClosedAlert(lang)).catch(() => {});
         const projId = Number(ctx.match[1]);
         const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
         const proj = await getProjectById(env.DB, projId);
@@ -2217,74 +2314,79 @@ export default {
           : (cmdMsgId ? `selproj_report_${projId}_${cmdMsgId}` : `selproj_report_${projId}`);
 
         const kb = new InlineKeyboard()
-          .text("« Back to Project", backData)
+          .text(t.backToProjectBtn(lang), backData)
           .row()
-          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
-        await ctx.editMessageText(`🔒 <b>Project ${escapeHtml(proj.name)} is now closed and archived.</b>`, { parse_mode: "HTML", reply_markup: kb });
+          .text(t.closeBtn(lang), cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        await ctx.editMessageText(t.projectClosedSuccess(lang, proj.name), { parse_mode: "HTML", reply_markup: kb });
       });
 
       // --- PRIVATE CHAT (PV) NAVIGATION CALLBACKS ---
       bot.callbackQuery(/^pv_proj_(\d+)$/, async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || ctx.from.id);
         const projId = Number(ctx.match[1]);
         const proj = await getProjectById(env.DB, projId);
         if (!proj) return;
         const userId = ctx.from.id;
         const { netBalances, names, totalPaid, totalShare } = await calculateBalances(env.DB, projId);
         const myBal = netBalances[userId] || 0;
+        const statusText = t.pvStatusLabel(lang, proj.status);
 
-        let msg = `📁 <b>${escapeHtml(proj.name)}</b> (${proj.status.toUpperCase()})\n\n`;
+        let msg = `📁 <b>${escapeHtml(proj.name)}</b> (${statusText})\n\n`;
         const transactions = getSettlementTransactions(netBalances);
-        const myDebts = transactions.filter(t => t.from === userId);
-        const myCredits = transactions.filter(t => t.to === userId);
+        const myDebts = transactions.filter(tr => tr.from === userId);
+        const myCredits = transactions.filter(tr => tr.to === userId);
 
         if (myDebts.length > 0 || myCredits.length > 0) {
-          msg += `🧾 <b>Debts in this project:</b>\n`;
-          myDebts.forEach(d => msg += `\u200E🔴 You owe <b>${d.amount.toFixed(2)}</b> to ${escapeHtml(names[d.to] || 'Unknown')}\n`);
-          myCredits.forEach(c => msg += `\u200E🟢 You get <b>${c.amount.toFixed(2)}</b> from ${escapeHtml(names[c.from] || 'Unknown')}\n`);
+          msg += t.pvDebtsInProject(lang);
+          myDebts.forEach(d => msg += t.pvYouOwe(lang, `${d.amount.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`, names[d.to] || 'Unknown'));
+          myCredits.forEach(c => msg += t.pvYouGet(lang, `${c.amount.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`, names[c.from] || 'Unknown'));
           msg += `\n`;
         } else {
-          msg += `✅ <b>No pending debts in this project!</b>\n\n`;
+          msg += t.pvNoPendingDebtsProj(lang);
         }
 
-        msg += `💰 <b>Total Paid:</b> ${totalPaid[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
-        msg += `🍽️ <b>Your Share:</b> ${totalShare[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}\n`;
+        msg += t.pvTotalPaid(lang, `${totalPaid[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`);
+        msg += t.pvYourShare(lang, `${totalShare[userId]?.toFixed(2) || '0.00'}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`);
         msg += `------------------------------------\n`;
-        if (myBal > 0.01) msg += `🟢 <b>Net Total:</b> Gets back <b>+${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}</b>`;
-        else if (myBal < -0.01) msg += `🔴 <b>Net Total:</b> Owes <b>${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}</b>`;
-        else msg += `⚪ <b>Net Total:</b> Settled ($0.00)`;
+        if (myBal > 0.01) msg += t.pvNetTotalGetsBack(lang, `${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`);
+        else if (myBal < -0.01) msg += t.pvNetTotalOwes(lang, `${myBal.toFixed(2)}${proj.currency ? ' ' + escapeHtml(proj.currency) : ''}`);
+        else msg += t.pvNetTotalSettled(lang);
 
         const kb = new InlineKeyboard()
-          .text("🧾 View Transactions", `selproj_tx_${projId}`).row();
+          .text(t.viewTransactionsBtn(lang), `selproj_tx_${projId}`).row();
         if (proj.status === "ended") {
-          kb.text("🗑️ Delete Project", `askdel_proj_${projId}_0`).row();
+          kb.text(t.deleteProjectBtn(lang), `askdel_proj_${projId}_0`).row();
         } else {
-          kb.text("🔒 Close Project", `closeproj_${projId}_0`).row();
+          kb.text(t.closeProjectBtn(lang), `closeproj_${projId}_0`).row();
         }
-        kb.text("« My Balances", "pv_back_bal")
-          .text("« My Projects", "pv_back_proj");
+        kb.text(t.pvBackBalBtn(lang), "pv_back_bal")
+          .text(t.pvBackProjBtn(lang), "pv_back_proj");
         await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
       });
 
       bot.callbackQuery("pv_back_bal", async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         if (ctx.chat?.type === "private") {
+          const lang = await getChatLanguage(env.DB, ctx.chat.id);
           await ctx.deleteMessage().catch(() => {});
-          await showPrivateBalances(ctx);
+          await showPrivateBalances(ctx, lang);
         }
       });
 
       bot.callbackQuery("pv_back_proj", async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         if (ctx.chat?.type === "private") {
+          const lang = await getChatLanguage(env.DB, ctx.chat.id);
           await ctx.deleteMessage().catch(() => {});
-          await showPrivateProjects(ctx);
+          await showPrivateProjects(ctx, lang);
         }
       });
 
       // --- DISMISSAL / CLEANUP HANDLERS ---
       bot.callbackQuery(/^canceldraft_(.+)$/, async (ctx) => {
-        await ctx.answerCallbackQuery("Cancelled").catch(() => {});
+        const lang = await getChatLanguage(env.DB, ctx.chat?.id || 0);
+        await ctx.answerCallbackQuery(t.actionCancelled(lang)).catch(() => {});
         const draftId = ctx.match[1];
         const draft = await getDraft(env.DB, draftId);
         const toDelete: number[] = [];
