@@ -18,7 +18,7 @@
 
 [![Telegram](https://img.shields.io/badge/Telegram-@DongShareBot-2CA5E0?style=flat-square&logo=telegram&logoColor=white)](https://t.me/DongShareBot)
 [![Free](https://img.shields.io/badge/100%25-Free_%26_Instant-success?style=flat-square)](https://t.me/DongShareBot)
-[![Persian & English](https://img.shields.io/badge/Language-English_%26_فارسی-informational?style=flat-square)](https://t.me/DongShareBot)
+[![Bilingual: English & Persian](https://img.shields.io/badge/Language-English_%26_فارسی-informational?style=flat-square)](https://t.me/DongShareBot)
 [![Zero Setup](https://img.shields.io/badge/Setup-Zero_Install-blueviolet?style=flat-square)](https://t.me/DongShareBot?startgroup=true)
 [![Cloudflare Workers](https://img.shields.io/badge/Powered_by-Cloudflare_Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
 [![License: AGPL v3](https://img.shields.io/badge/License-GNU_AGPLv3-blue.svg?style=flat-square)](LICENSE)
@@ -58,13 +58,13 @@ You don't need to start the bot, configure profiles, or learn complicated comman
 
 ### 🧮 1. Does Your Math on the Fly
 Forgot your calculator? Don't worry about it:
-- Type `/add 45000+12000 Taxi` (it adds them up for you!)
-- Type `/add 150000/3 Lunch` (it evaluates math expressions natively)
+- Type `/add 45000+12000 Taxi` (it sums them up natively!)
+- Type `/add 150000/3 Lunch` (evaluates arithmetic on the spot)
 - Type `/pay 50000*0.5` when repaying half!
 
 ### 🍕 2. Equal or Unequal Split? Both are effortless!
 - **Equal Split**: 1 tap to select who shared it, and everyone's share is divided automatically.
-- **Unequal Split**: Had 4 people at dinner where one ordered salad and another ordered steak? Tap **⚡ Unequal Share** to enter exact shares step-by-step. Don't know the total bill? It sums up individual shares for you!
+- **Unequal Split (دُنگ نامساوی)**: Had 4 people at dinner where one ordered salad and another ordered steak? Tap **⚡ Unequal Share** to enter exact shares step-by-step. Don't know the total bill? It sums up individual shares for you!
 
 ### ⚖️ 3. The "Smart Settlement" Magic
 Imagine:
@@ -72,17 +72,21 @@ Imagine:
 - Reza owes Sara $20.
 Instead of doing 2 separate bank transfers, **Dong Bot solves the equation**: Ali pays Sara $20 directly! Everyone is settled with the absolute fewest transactions possible.
 
-### 🇮🇷 4. فارسی و انگلیسی بدون بهم‌ریختگی (RTL-Proof)
-Persian & Arabic names, amounts, and arrows never get flipped backwards or scrambled in Telegram. Everything aligns beautifully and cleanly.
+### 🌐 4. Full Bilingual Support (English & فارسی) + RTL-Proof
+Dong Bot fully supports both **English** and **فارسی (Persian)**:
+- Switch language anytime in any chat by sending `/lang`.
+- Interactive flag buttons (`🇬🇧 English` / `🇮🇷 فارسی`) let your group choose their preferred language with one tap.
+- Persian/Arabic names, currency symbols, and directional transfers (`Ali به Reza` / `Ali to Reza`) never get inverted or reversed in Telegram thanks to strict BiDi/LRM formatting.
 
 ### 🧹 5. Keeps Your Group Chat Super Clean
-Nobody likes bots that spam 50 messages. Dong Bot automatically cleans up its own prompt questions and buttons once you confirm!
+Nobody likes bots that spam 50 messages. Dong Bot automatically cleans up its own prompt questions and temporary buttons once you confirm or finish an action!
 
 ### 📱 6. Your Personal Secret Dashboard
 Open [@DongShareBot](https://t.me/DongShareBot) in private chat to see:
 - 👤 All your debts and credits across **all your different groups** in one screen.
 - 📁 Active and past projects.
 - 🧾 Past transactions list.
+- ⌨️ Custom instant-reply keyboard available in both English and Persian (`👤 My Balances` / `👤 حساب من`).
 
 ---
 
@@ -97,6 +101,7 @@ Open [@DongShareBot](https://t.me/DongShareBot) in private chat to see:
 | 📊 Check everyone's balances & stats | `/balances` | `/balances` |
 | 🧾 Browse & inspect transactions | `/transaction` | `/transaction` |
 | 📈 View full reports / close project | `/projects` | `/projects` |
+| 🌐 Change language (English / فارسی) | `/lang` | `/lang` |
 | ❓ Quick guide & help | `/help` | `/help` |
 
 ---
