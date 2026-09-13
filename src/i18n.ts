@@ -32,7 +32,7 @@ export const t = {
   joinProjectBtn: (lang: Language) => (lang === 'fa' ? '✋ عضویت در پروژه' : '✋ Join Project'),
   doneAddingBtn: (lang: Language) => (lang === 'fa' ? '✅ اتمام افزودن' : '✅ Done Adding'),
   unequalShareBtn: (lang: Language) => (lang === 'fa' ? '⚡ سهم نامساوی' : '⚡ Unequal Share'),
-  unequalSplitBtn: (lang: Language) => (lang === 'fa' ? '⚡ دانگ نامساوی' : '⚡ Unequal Split'),
+  unequalSplitBtn: (lang: Language) => (lang === 'fa' ? '⚡ دُنگ نامساوی' : '⚡ Unequal Split'),
   enterSharesBtn: (lang: Language) => (lang === 'fa' ? '⚡ ورود سهم‌ها ➡️' : '⚡ Enter Shares ➡️'),
   confirmEqualBtn: (lang: Language) => (lang === 'fa' ? '💾 تایید تقسیم مساوی' : '💾 Confirm Equal'),
   restartSharesBtn: (lang: Language) => (lang === 'fa' ? '🔄 ثبت مجدد سهم‌ها' : '🔄 Restart Shares'),
@@ -64,12 +64,12 @@ export const t = {
   txDeletedAlert: (lang: Language) => (lang === 'fa' ? 'تراکنش برای همیشه حذف شد!' : 'Transaction permanently deleted!'),
   selectAtLeastOne: (lang: Language) => (lang === 'fa' ? 'حداقل ۱ نفر را انتخاب کنید!' : 'Select at least 1 person!'),
   useUnequalToEnterShares: (lang: Language) =>
-    lang === 'fa' ? 'لطفاً از دکمه دانگ نامساوی برای ورود سهم‌ها استفاده کنید!' : 'Please use Unequal Split to enter shares!',
+    lang === 'fa' ? 'لطفاً از دکمه دُنگ نامساوی برای ورود سهم‌ها استفاده کنید!' : 'Please use Unequal Split to enter shares!',
   cannotRemoveHasTx: (lang: Language) =>
     lang === 'fa' ? 'امکان حذف وجود ندارد: این عضو دارای تراکنش ثبت‌شده است!' : 'Cannot remove: member has recorded transactions!',
   unequalModeNotice: (lang: Language) =>
     lang === 'fa'
-      ? '⚡ <b>حالت دانگ نامساوی</b> (مبلغ کل بر اساس سهم تک‌تک افراد محاسبه می‌شود)'
+      ? '⚡ <b>حالت دُنگ نامساوی</b> (مبلغ کل بر اساس سهم تک‌تک افراد محاسبه می‌شود)'
       : '⚡ <b>Unequal Share Mode</b> (Total will be calculated from individual shares)',
   enteringSharesBelow: (lang: Language) =>
     lang === 'fa' ? '⚡ <i>در حال دریافت سهم‌های نامساوی در پیام‌های زیر...</i>' : '⚡ <i>Entering unequal shares below...</i>',
@@ -230,7 +230,7 @@ export const t = {
       : `💰 Amount: <b>${amount}</b>\nReply with an optional <b>Description</b> (e.g. <code>Dinner</code>) or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`,
   addStep2PromptUnequal: (lang: Language, draftId: string) =>
     lang === 'fa'
-      ? `⚡ <b>هزینه دانگ نامساوی</b>\n<b>توضیحات یا بابتِ</b> هزینه را بفرستید (مثلاً <code>شام</code>) یا <b>رد کردن</b> را بزنید:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`
+      ? `⚡ <b>هزینه دُنگ نامساوی</b>\n<b>توضیحات یا بابتِ</b> هزینه را بفرستید (مثلاً <code>شام</code>) یا <b>رد کردن</b> را بزنید:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`
       : `⚡ <b>Unequal Expense</b>\nReply with an optional <b>Description</b> (e.g. <code>Dinner</code>) or tap <b>Skip</b>:\n\n<span class="tg-spoiler">[Action: add_step2_${draftId}]</span>`,
   addStep2Placeholder: (lang: Language) =>
     lang === 'fa' ? 'توضیحات یا رد کردن' : 'Description or tap Skip',
@@ -244,7 +244,7 @@ export const t = {
       : `🧾 <b>${escapeHtml(desc)}</b> (${amount})\n<i>Toggle who shares this equally, or choose Unequal:</i>`,
   splitSelectHeaderUnequal: (lang: Language, desc: string) =>
     lang === 'fa'
-      ? `🧾 <b>${escapeHtml(desc)}</b> (⚡ دانگ نامساوی)\n<i>افرادی که در این هزینه سهیم هستند را انتخاب کنید:</i>`
+      ? `🧾 <b>${escapeHtml(desc)}</b> (⚡ دُنگ نامساوی)\n<i>افرادی که در این هزینه سهیم هستند را انتخاب کنید:</i>`
       : `🧾 <b>${escapeHtml(desc)}</b> (⚡ Unequal Share)\n<i>Select who shares this expense, then enter individual shares:</i>`,
   promptNextShareMsg: (
     lang: Language,

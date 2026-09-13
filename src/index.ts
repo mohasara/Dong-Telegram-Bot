@@ -930,7 +930,7 @@ export default {
             if (ctx.chat && toDelete.length > 0) await deleteMessages(ctx, ctx.chat.id, toDelete);
             return ctx.reply(t.expenseCancelled(draftLang));
           }
-          if (raw.toLowerCase() === "unequal" || raw.toLowerCase() === "itemized" || raw === "-" || raw.toLowerCase() === "skip" || raw === "دانگ نامساوی" || raw === "رد کردن") {
+          if (raw.toLowerCase() === "unequal" || raw.toLowerCase() === "itemized" || raw === "-" || raw.toLowerCase() === "skip" || raw === "دُنگ نامساوی" || raw === "دنگ نامساوی" || raw === "دانگ نامساوی" || raw === "رد کردن") {
             draft.isItemized = true;
             draft.amount = 0;
             draft.step = "desc";
@@ -1317,7 +1317,7 @@ export default {
         if (members.length % 2 !== 0) kb.row();
         kb.text(t.cancelBtn(lang), `canceldraft_${draftId}`);
 
-        const amountLabel = isItemized ? (lang === 'fa' ? "(⚡ دانگ نامساوی)" : "(⚡ Unequal Share)") : `(${amount})`;
+        const amountLabel = isItemized ? (lang === 'fa' ? "(⚡ دُنگ نامساوی)" : "(⚡ Unequal Share)") : `(${amount})`;
         const text = t.promptPayer(lang, desc, amountLabel);
         if (ctx.callbackQuery) {
           await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
