@@ -2106,15 +2106,14 @@ export default {
         }
 
         const kb = new InlineKeyboard();
+        const balData = cmdMsgId ? `selproj_bal_${projId}_${cmdMsgId}` : `selproj_bal_${projId}`;
+        kb.text("👥 View Members", balData);
         if (proj.status === "ended") {
           const askDelData = cmdMsgId ? `askdel_proj_${projId}_${cmdMsgId}` : `askdel_proj_${projId}`;
           kb.text("🗑️ Delete Project", askDelData).row();
         } else {
-          const balData = cmdMsgId ? `selproj_bal_${projId}_${cmdMsgId}` : `selproj_bal_${projId}`;
           const closeData = cmdMsgId ? `closeproj_${projId}_${cmdMsgId}` : `closeproj_${projId}`;
-          kb.text("👥 View Members", balData)
-            .text("🔒 Close Project", closeData)
-            .row();
+          kb.text("🔒 Close Project", closeData).row();
         }
         kb.text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
         if (ctx.callbackQuery) await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
@@ -2182,17 +2181,41 @@ export default {
 
         const unsettled = Object.values(netBalances).some(b => Math.abs(b) > 0.01);
         if (unsettled) {
+          const cfmData = cmdMsgId ? `cfmclose_proj_${projId}_${cmdMsgId}` : `cfmclose_proj_${projId}`;
           const kb = new InlineKeyboard()
-            .text("« Back to Project", backData)
+            .text("🔒 Yes, Close Anyway", cfmData)
+            .text("« Cancel", backData)
             .row()
             .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
           return ctx.editMessageText(
-            `❌ <b>Cannot close ${escapeHtml(proj.name)}!</b>\n\nDebts remain unsettled. Use /settle to view debts and /pay to record transfers.`,
+            `⚠️ <b>Close Project with Unsettled Debts?</b>\n\n` +
+            `Project <b>${escapeHtml(proj.name)}</b> still has pending debts!\n\n` +
+            `Are you sure you want to close and archive it?\n\n` +
+            `<i>ℹ️ You can still view its report or delete it anytime from /projects.</i>`,
             { parse_mode: "HTML", reply_markup: kb }
           );
         }
 
         await env.DB.prepare("UPDATE projects SET status = 'ended' WHERE id = ?").bind(projId).run();
+        const kb = new InlineKeyboard()
+          .text("« Back to Project", backData)
+          .row()
+          .text("❌ Close", cmdMsgId ? `closeflow_${cmdMsgId}` : "closemsg");
+        await ctx.editMessageText(`🔒 <b>Project ${escapeHtml(proj.name)} is now closed and archived.</b>`, { parse_mode: "HTML", reply_markup: kb });
+      });
+
+      bot.callbackQuery(/^cfmclose_proj_(\d+)(?:_(\d+))?$/, async (ctx) => {
+        await ctx.answerCallbackQuery("Project closed!").catch(() => {});
+        const projId = Number(ctx.match[1]);
+        const cmdMsgId = ctx.match[2] ? Number(ctx.match[2]) : 0;
+        const proj = await getProjectById(env.DB, projId);
+        if (!proj) return;
+
+        await env.DB.prepare("UPDATE projects SET status = 'ended' WHERE id = ?").bind(projId).run();
+        const backData = ctx.chat?.type === "private"
+          ? `pv_proj_${projId}`
+          : (cmdMsgId ? `selproj_report_${projId}_${cmdMsgId}` : `selproj_report_${projId}`);
+
         const kb = new InlineKeyboard()
           .text("« Back to Project", backData)
           .row()
