@@ -1,7 +1,7 @@
 {
   "name": "dong",
   "version": "1.0.0",
-  "description": "",
+  "description": "Fast, zero-setup Telegram bot to split group expenses, calculate unequal shares, evaluate inline math, and optimize debt settlements (English & Persian)",
   "main": "index.js",
   "scripts": {
     "dev": "wrangler dev",
@@ -9,15 +9,25 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mohasara/dong.git"
+    "url": "git+https://github.com/mohasara/Dong-Telegram-Bot.git"
   },
-  "keywords": [],
+  "keywords": [
+    "telegram-bot",
+    "bill-splitting",
+    "expense-tracker",
+    "splitwise-alternative",
+    "cloudflare-workers",
+    "grammy",
+    "typescript",
+    "persian",
+    "dong"
+  ],
   "author": "",
   "license": "AGPL-3.0-or-later",
   "bugs": {
-    "url": "https://github.com/mohasara/dong/issues"
+    "url": "https://github.com/mohasara/Dong-Telegram-Bot/issues"
   },
-  "homepage": "https://github.com/mohasara/dong#readme",
+  "homepage": "https://t.me/DongShareBot",
   "dependencies": {
     "grammy": "^1.46.0"
   },
