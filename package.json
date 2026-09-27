@@ -20,6 +20,7 @@
     "grammy",
     "typescript",
     "persian",
+    "moshrefbashi",
     "dong"
   ],
   "author": "",
@@ -27,7 +28,7 @@
   "bugs": {
     "url": "https://github.com/mohasara/Dong-Telegram-Bot/issues"
   },
-  "homepage": "https://t.me/DongShareBot",
+  "homepage": "https://t.me/MoshrefBashiBot",
   "dependencies": {
     "grammy": "^1.46.0"
   },

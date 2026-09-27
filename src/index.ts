@@ -4,6 +4,7 @@ import { Language, escapeHtml, t } from "./i18n";
 export interface Env {
   DB: D1Database;
   BOT_TOKEN: string;
+  OLD_BOT_TOKEN?: string;
 }
 
 export const GROUP_COMMANDS = [
@@ -15,7 +16,7 @@ export const GROUP_COMMANDS = [
   { command: "settle", description: "Optimal settlement plan (who pays whom)" },
   { command: "projects", description: "Projects, reports & close/delete projects" },
   { command: "lang", description: "Change language (English / فارسی)" },
-  { command: "help", description: "How to use Dong Bot" },
+  { command: "help", description: "How to use MoshrefBashi Bot" },
 ];
 
 export const pvKeyboardEn = new Keyboard()
@@ -334,6 +335,47 @@ export default {
       await bot.api.setMyCommands(GROUP_COMMANDS, { scope: { type: "all_group_chats" } });
       await bot.api.setMyCommands([{ command: "start", description: "Open bot menu" }], { scope: { type: "all_private_chats" } });
       return new Response("Commands registered for all_group_chats and configured for all_private_chats.", { status: 200 });
+    }
+
+    if (url.pathname === "/migrate-old-bot") {
+      const token = url.searchParams.get("token") || env.OLD_BOT_TOKEN;
+      if (!token) return new Response("Missing token query param (?token=...)", { status: 400 });
+      const webhookUrl = `${url.origin}/oldbot`;
+      const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+      const data = await res.json();
+      return new Response(JSON.stringify(data, null, 2), { headers: { "Content-Type": "application/json" } });
+    }
+
+    if (url.pathname === "/oldbot" || url.pathname === "/old-bot") {
+      if (request.method === "POST") {
+        const oldToken = env.OLD_BOT_TOKEN || env.BOT_TOKEN;
+        const oldBot = new Bot(oldToken);
+        oldBot.on("message", async (ctx) => {
+          const kb = new InlineKeyboard()
+            .url("➕ افزودن مُشْرِفْ‌بٰاشٖیْ به گروه", "https://t.me/MoshrefBashiBot?startgroup=true")
+            .row()
+            .url("💬 گفتگوی مستقیم با ربات", "https://t.me/MoshrefBashiBot");
+
+          const migrationMsg =
+            `📢 <b>ربات ارتقا یافت و منتقل شد!</b>\n\n` +
+            `از این پس دُنگ بات با نام اصیل <b>«مُشْرِفْ‌بٰاشٖیْ»</b> و شناسه جدید <b>@MoshrefBashiBot</b> در خدمت شماست.\n\n` +
+            `✅ تمامی اطلاعات، پروژه‌ها و حساب‌های قبلی شما کاملاً محفوظ است!\n\n` +
+            `👉 لطفاً با زدن دکمه زیر، <b>@MoshrefBashiBot</b> را به گروه خود اضافه کرده و از آن استفاده کنید:\n\n` +
+            `────────────────────\n` +
+            `<i>📢 <b>Bot has moved!</b>\n` +
+            `Dong Bot has upgraded to <b>@MoshrefBashiBot</b>. All your previous projects, expenses, and balances are 100% safe. Please add @MoshrefBashiBot to your group using the button below.</i>`;
+
+          await ctx.reply(migrationMsg, { parse_mode: "HTML", reply_markup: kb });
+        });
+        oldBot.on("callback_query", async (ctx) => {
+          await ctx.answerCallbackQuery({
+            text: "ربات به @MoshrefBashiBot منتقل شد! لطفاً ربات جدید را به گروه اضافه کنید.",
+            show_alert: true,
+          }).catch(() => {});
+        });
+        return webhookCallback(oldBot, "cloudflare-mod")(request);
+      }
+      return new Response("Old bot migration endpoint is active.", { status: 200 });
     }
 
     if (request.method === "POST") {

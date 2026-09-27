@@ -1,7 +1,10 @@
 <div align="center">
 
-# 🍕 Dong Bot (دُنگ بات)
+<img src="assets/moshrefbashi_thumb.png" alt="مُشْرِفْ‌بٰاشٖیْ (MoshrefBashi)" width="160" />
+
+# ⚖️ مُشْرِفْ‌بٰاشٖیْ — MoshrefBashi Bot
 ### The Easiest, Coolest Way to Split Bills with Friends on Telegram!
+#### *(formerly Dong Bot / دُنگ بات)*
 
 <p align="center">
   <b>No spreadsheets. No calculators. No awkward "who owes whom" math.</b><br/>
@@ -10,20 +13,25 @@
 
 <br/>
 
-<a href="https://t.me/DongShareBot?startgroup=true"><img src="https://img.shields.io/badge/✨_Add_to_Telegram_Group_&_See_Its_Miracle-Free_Forever-2ecc71?style=for-the-badge&logo=telegram&logoColor=white" alt="Add to Telegram Group & See Its Miracle" height="54" /></a>
+<a href="https://t.me/MoshrefBashiBot?startgroup=true"><img src="https://img.shields.io/badge/✨_Add_to_Telegram_Group_&_See_Its_Miracle-Free_Forever-2ecc71?style=for-the-badge&logo=telegram&logoColor=white" alt="Add to Telegram Group & See Its Miracle" height="54" /></a>
 <br/><br/>
-<a href="https://t.me/DongShareBot"><img src="https://img.shields.io/badge/💬_Or_Test_It_in_Private_Chat-@DongShareBot-0088cc?style=for-the-badge&logo=telegram&logoColor=white" alt="Test It in Private Chat" height="38" /></a>
+<a href="https://t.me/MoshrefBashiBot"><img src="https://img.shields.io/badge/💬_Or_Test_It_in_Private_Chat-@MoshrefBashiBot-0088cc?style=for-the-badge&logo=telegram&logoColor=white" alt="Test It in Private Chat" height="38" /></a>
 
 <br/><br/>
 
-[![Telegram](https://img.shields.io/badge/Telegram-@DongShareBot-2CA5E0?style=flat-square&logo=telegram&logoColor=white)](https://t.me/DongShareBot)
-[![Free](https://img.shields.io/badge/100%25-Free_%26_Instant-success?style=flat-square)](https://t.me/DongShareBot)
-[![Bilingual: English & Persian](https://img.shields.io/badge/Language-English_%26_فارسی-informational?style=flat-square)](https://t.me/DongShareBot)
-[![Zero Setup](https://img.shields.io/badge/Setup-Zero_Install-blueviolet?style=flat-square)](https://t.me/DongShareBot?startgroup=true)
+[![Telegram](https://img.shields.io/badge/Telegram-@MoshrefBashiBot-2CA5E0?style=flat-square&logo=telegram&logoColor=white)](https://t.me/MoshrefBashiBot)
+[![Free](https://img.shields.io/badge/100%25-Free_%26_Instant-success?style=flat-square)](https://t.me/MoshrefBashiBot)
+[![Bilingual: English & Persian](https://img.shields.io/badge/Language-English_%26_فارسی-informational?style=flat-square)](https://t.me/MoshrefBashiBot)
+[![Zero Setup](https://img.shields.io/badge/Setup-Zero_Install-blueviolet?style=flat-square)](https://t.me/MoshrefBashiBot?startgroup=true)
 [![Cloudflare Workers](https://img.shields.io/badge/Powered_by-Cloudflare_Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
 [![License: AGPL v3](https://img.shields.io/badge/License-GNU_AGPLv3-blue.svg?style=flat-square)](LICENSE)
 
 </div>
+
+---
+
+> 📜 **Why "MoshrefBashi" (مُشْرِفْ‌بٰاشٖیْ)?**  
+> In classic Persian administrative history (Safavid and Qajar eras), the **Moshref (مُشرف)** was the trusted inspector and auditor of finances, revenues, and expenditures. **MoshrefBashi (مُشرف‌باشی)** was the Chief Comptroller and Master of Accounts — ensuring every single dinar and share was settled fairly and transparently!
 
 ---
 
@@ -35,7 +43,7 @@ You don't need to start the bot, configure profiles, or learn complicated comman
        [ 🚗 Road Trip / 🍕 Dinner with Friends ]
                           │
                           ▼
-            Just add @DongShareBot to group!
+            Just add @MoshrefBashiBot to group!
                           │
             Type: /new Trip to North
             (Friends tap [✋ Join Project])
@@ -70,19 +78,19 @@ Forgot your calculator? Don't worry about it:
 Imagine:
 - Ali owes Reza $20.
 - Reza owes Sara $20.
-Instead of doing 2 separate bank transfers, **Dong Bot solves the equation**: Ali pays Sara $20 directly! Everyone is settled with the absolute fewest transactions possible.
+Instead of doing 2 separate bank transfers, **MoshrefBashi solves the equation**: Ali pays Sara $20 directly! Everyone is settled with the absolute fewest transactions possible.
 
 ### 🌐 4. Full Bilingual Support (English & فارسی) + RTL-Proof
-Dong Bot fully supports both **English** and **فارسی (Persian)**:
+MoshrefBashi fully supports both **English** and **فارسی (Persian)**:
 - Switch language anytime in any chat by sending `/lang`.
 - Interactive flag buttons (`🇬🇧 English` / `🇮🇷 فارسی`) let your group choose their preferred language with one tap.
 - Persian/Arabic names, currency symbols, and directional transfers (`Ali به Reza` / `Ali to Reza`) never get inverted or reversed in Telegram thanks to strict BiDi/LRM formatting.
 
 ### 🧹 5. Keeps Your Group Chat Super Clean
-Nobody likes bots that spam 50 messages. Dong Bot automatically cleans up its own prompt questions and temporary buttons once you confirm or finish an action!
+Nobody likes bots that spam 50 messages. MoshrefBashi automatically cleans up its own prompt questions and temporary buttons once you confirm or finish an action!
 
 ### 📱 6. Your Personal Secret Dashboard
-Open [@DongShareBot](https://t.me/DongShareBot) in private chat to see:
+Open [@MoshrefBashiBot](https://t.me/MoshrefBashiBot) in private chat to see:
 - 👤 All your debts and credits across **all your different groups** in one screen.
 - 📁 Active and past projects.
 - 🧾 Past transactions list.
@@ -114,9 +122,9 @@ Add it to your group in 5 seconds — you'll never split expenses manually again
 
 <br/>
 
-<a href="https://t.me/DongShareBot?startgroup=true"><img src="https://img.shields.io/badge/✨_Add_to_Telegram_Group_Now-Free_Forever-2ecc71?style=for-the-badge&logo=telegram&logoColor=white" height="54" /></a>
+<a href="https://t.me/MoshrefBashiBot?startgroup=true"><img src="https://img.shields.io/badge/✨_Add_to_Telegram_Group_Now-Free_Forever-2ecc71?style=for-the-badge&logo=telegram&logoColor=white" height="54" /></a>
 <br/><br/>
-<a href="https://t.me/DongShareBot"><img src="https://img.shields.io/badge/💬_Or_Test_It_in_Private_Chat-@DongShareBot-0088cc?style=for-the-badge&logo=telegram&logoColor=white" height="38" /></a>
+<a href="https://t.me/MoshrefBashiBot"><img src="https://img.shields.io/badge/💬_Or_Test_It_in_Private_Chat-@MoshrefBashiBot-0088cc?style=for-the-badge&logo=telegram&logoColor=white" height="38" /></a>
 
 <br/><br/>
 

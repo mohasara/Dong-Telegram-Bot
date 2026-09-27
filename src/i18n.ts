@@ -128,15 +128,15 @@ export const t = {
   // Start & Help
   startGroup: (lang: Language) =>
     lang === 'fa'
-      ? `👋 دُنگ بات فعال است!\n\nایجاد پروژه جدید با: <code>/new &lt;نام&gt; [واحد پول]</code>\nبرای مشاهده راهنما /help را ارسال کنید.`
-      : `👋 Dong Bot is active!\n\nCreate a project with: <code>/new &lt;Name&gt; [Currency]</code>\nType /help to see all commands.`,
+      ? `👋 مُشْرِفْ‌بٰاشٖیْ فعال است!\n\nایجاد پروژه جدید با: <code>/new &lt;نام&gt; [واحد پول]</code>\nبرای مشاهده راهنما /help را ارسال کنید.`
+      : `👋 MoshrefBashi Bot is active!\n\nCreate a project with: <code>/new &lt;Name&gt; [Currency]</code>\nType /help to see all commands.`,
   startPrivate: (lang: Language) =>
     lang === 'fa'
-      ? `👋 <b>به دُنگ بات خوش آمدید!</b>\n\nاینجا در چت خصوصی می‌توانید بدهی‌ها، طلب‌ها و پروژه‌های فعال خود را در تمامی گروه‌ها به راحتی مشاهده کنید.\n\n👇 <b>یک گزینه را انتخاب کنید:</b>`
-      : `👋 <b>Welcome to Dong Split Bot!</b>\n\nHere in private chat, you can check your debts, credits, and active projects across all your groups without using slash commands.\n\n👇 <b>Tap a button below:</b>`,
+      ? `👋 <b>به مُشْرِفْ‌بٰاشٖیْ خوش آمدید!</b>\n\nاینجا در چت خصوصی می‌توانید بدهی‌ها، طلب‌ها و پروژه‌های فعال خود را در تمامی گروه‌ها به راحتی مشاهده کنید.\n\n👇 <b>یک گزینه را انتخاب کنید:</b>`
+      : `👋 <b>Welcome to MoshrefBashi Bot!</b>\n\nHere in private chat, you can check your debts, credits, and active projects across all your groups without using slash commands.\n\n👇 <b>Tap a button below:</b>`,
   helpGroup: (lang: Language) =>
     lang === 'fa'
-      ? `📖 <b>دستورات دُنگ بات:</b>\n\n` +
+      ? `📖 <b>دستورات مُشْرِفْ‌بٰاشٖیْ:</b>\n\n` +
         `• <code>/new &lt;نام&gt; [واحد پول]</code> — ایجاد پروژه جدید\n` +
         `• <code>/add [مبلغ] [توضیحات]</code> — ثبت هزینه جدید (پشتیبانی از محاسبات: <code>5000+2000 تاکسی</code>)\n` +
         `• <code>/pay [مبلغ]</code> — ثبت واریزی و بازپرداخت (مانند: <code>10000/2</code>)\n` +
@@ -146,7 +146,7 @@ export const t = {
         `• <code>/projects</code> — گزارش هزینه‌ها، بستن و حذف پروژه‌ها\n` +
         `• <code>/lang</code> — تغییر زبان (English / فارسی)\n` +
         `• <code>/help</code> — راهنمای استفاده از ربات\n`
-      : `📖 <b>Dong Split Bot Commands:</b>\n\n` +
+      : `📖 <b>MoshrefBashi Bot Commands:</b>\n\n` +
         `• <code>/new &lt;Name&gt; [Currency]</code> — Create a new project\n` +
         `• <code>/add [amount] [desc]</code> — Record a new expense (supports math: <code>5000+2000 Taxi</code>)\n` +
         `• <code>/pay [amount]</code> — Record a transfer (supports math: <code>10000/2</code>)\n` +
@@ -155,10 +155,10 @@ export const t = {
         `• <code>/settle</code> — Get optimal debt settlement plan\n` +
         `• <code>/projects</code> — View projects, reports, close & delete\n` +
         `• <code>/lang</code> — Change language (English / فارسی)\n` +
-        `• <code>/help</code> — How to use Dong Bot\n`,
+        `• <code>/help</code> — How to use MoshrefBashi Bot\n`,
   helpPrivate: (lang: Language) =>
     lang === 'fa'
-      ? `👋 <b>راهنمای دُنگ بات</b>\n\n` +
+      ? `👋 <b>راهنمای مُشْرِفْ‌بٰاشٖیْ</b>\n\n` +
         `<b>نحوه استفاده در گروه‌ها:</b>\n` +
         `۱. ربات را به گروه خود اضافه کنید.\n` +
         `۲. دستور <code>/new &lt;نام&gt; [واحد پول]</code> را برای ایجاد پروژه بفرستید.\n` +
@@ -169,7 +169,7 @@ export const t = {
         `۷. بازپرداخت‌ها را با <code>/pay 10000</code> ثبت کنید.\n` +
         `۸. گزارش‌ها، بستن یا حذف پروژه را با <code>/projects</code> انجام دهید.\n\n` +
         `<i>در این چت خصوصی می‌توانید وضعیت حساب خود در تمام گروه‌ها را مشاهده کنید!</i>`
-      : `👋 <b>Dong Split Bot Guide</b>\n\n` +
+      : `👋 <b>MoshrefBashi Bot Guide</b>\n\n` +
         `<b>How to use in groups:</b>\n` +
         `1. Add me to your group.\n` +
         `2. Type <code>/new &lt;Name&gt; [Currency]</code> to create a project.\n` +
