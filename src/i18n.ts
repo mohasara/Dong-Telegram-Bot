@@ -128,15 +128,15 @@ export const t = {
   // Start & Help
   startGroup: (lang: Language) =>
     lang === 'fa'
-      ? `👋 مُشْرِفْ‌بٰاشٖیْ فعال است!\n\nایجاد پروژه جدید با: <code>/new &lt;نام&gt; [واحد پول]</code>\nبرای مشاهده راهنما /help را ارسال کنید.`
+      ? `👋 مشرف باشی فعال است!\n\nایجاد پروژه جدید با: <code>/new &lt;نام&gt; [واحد پول]</code>\nبرای مشاهده راهنما /help را ارسال کنید.`
       : `👋 MoshrefBashi Bot is active!\n\nCreate a project with: <code>/new &lt;Name&gt; [Currency]</code>\nType /help to see all commands.`,
   startPrivate: (lang: Language) =>
     lang === 'fa'
-      ? `👋 <b>به مُشْرِفْ‌بٰاشٖیْ خوش آمدید!</b>\n\nاینجا در چت خصوصی می‌توانید بدهی‌ها، طلب‌ها و پروژه‌های فعال خود را در تمامی گروه‌ها به راحتی مشاهده کنید.\n\n👇 <b>یک گزینه را انتخاب کنید:</b>`
+      ? `👋 <b>به مشرف باشی خوش آمدید!</b>\n\nاینجا در چت خصوصی می‌توانید بدهی‌ها، طلب‌ها و پروژه‌های فعال خود را در تمامی گروه‌ها به راحتی مشاهده کنید.\n\n👇 <b>یک گزینه را انتخاب کنید:</b>`
       : `👋 <b>Welcome to MoshrefBashi Bot!</b>\n\nHere in private chat, you can check your debts, credits, and active projects across all your groups without using slash commands.\n\n👇 <b>Tap a button below:</b>`,
   helpGroup: (lang: Language) =>
     lang === 'fa'
-      ? `📖 <b>دستورات مُشْرِفْ‌بٰاشٖیْ:</b>\n\n` +
+      ? `📖 <b>دستورات مشرف باشی:</b>\n\n` +
         `• <code>/new &lt;نام&gt; [واحد پول]</code> — ایجاد پروژه جدید\n` +
         `• <code>/add [مبلغ] [توضیحات]</code> — ثبت هزینه جدید (پشتیبانی از محاسبات: <code>5000+2000 تاکسی</code>)\n` +
         `• <code>/pay [مبلغ]</code> — ثبت واریزی و بازپرداخت (مانند: <code>10000/2</code>)\n` +
@@ -158,7 +158,7 @@ export const t = {
         `• <code>/help</code> — How to use MoshrefBashi Bot\n`,
   helpPrivate: (lang: Language) =>
     lang === 'fa'
-      ? `👋 <b>راهنمای مُشْرِفْ‌بٰاشٖیْ</b>\n\n` +
+      ? `👋 <b>راهنمای مشرف باشی</b>\n\n` +
         `<b>نحوه استفاده در گروه‌ها:</b>\n` +
         `۱. ربات را به گروه خود اضافه کنید.\n` +
         `۲. دستور <code>/new &lt;نام&gt; [واحد پول]</code> را برای ایجاد پروژه بفرستید.\n` +

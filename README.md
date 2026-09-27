@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/moshrefbashi_thumb.png" alt="مُشْرِفْ‌بٰاشٖیْ (MoshrefBashi)" width="160" />
+<img src="https://raw.githubusercontent.com/mohasara/Dong-Telegram-Bot/main/assets/moshrefbashi_thumb.png" alt="مشرف باشی (MoshrefBashi)" width="160" />
 
-# ⚖️ مُشْرِفْ‌بٰاشٖیْ — MoshrefBashi Bot
+# ⚖️ MoshrefBashi (مشرف باشی)
 ### The Easiest, Coolest Way to Split Bills with Friends on Telegram!
 #### *(formerly Dong Bot / دُنگ بات)*
 
@@ -30,8 +30,8 @@
 
 ---
 
-> 📜 **Why "MoshrefBashi" (مُشْرِفْ‌بٰاشٖیْ)?**  
-> In classic Persian administrative history (Safavid and Qajar eras), the **Moshref (مُشرف)** was the trusted inspector and auditor of finances, revenues, and expenditures. **MoshrefBashi (مُشرف‌باشی)** was the Chief Comptroller and Master of Accounts — ensuring every single dinar and share was settled fairly and transparently!
+> 📜 **Why "MoshrefBashi" (مشرف باشی)?**  
+> In classic Persian administrative history (Safavid and Qajar eras), the **Moshref (مشرف)** was the trusted inspector and auditor of finances, revenues, and expenditures. **MoshrefBashi (مشرف باشی)** was the Chief Comptroller and Master of Accounts — ensuring every single dinar and share was settled fairly and transparently!
 
 ---
 

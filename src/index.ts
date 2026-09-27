@@ -352,13 +352,13 @@ export default {
         const oldBot = new Bot(oldToken);
         oldBot.on("message", async (ctx) => {
           const kb = new InlineKeyboard()
-            .url("➕ افزودن مُشْرِفْ‌بٰاشٖیْ به گروه", "https://t.me/MoshrefBashiBot?startgroup=true")
+            .url("➕ افزودن مشرف باشی به گروه", "https://t.me/MoshrefBashiBot?startgroup=true")
             .row()
             .url("💬 گفتگوی مستقیم با ربات", "https://t.me/MoshrefBashiBot");
 
           const migrationMsg =
             `📢 <b>ربات ارتقا یافت و منتقل شد!</b>\n\n` +
-            `از این پس دُنگ بات با نام اصیل <b>«مُشْرِفْ‌بٰاشٖیْ»</b> و شناسه جدید <b>@MoshrefBashiBot</b> در خدمت شماست.\n\n` +
+            `از این پس دُنگ بات با نام اصیل <b>«مشرف باشی»</b> و شناسه جدید <b>@MoshrefBashiBot</b> در خدمت شماست.\n\n` +
             `✅ تمامی اطلاعات، پروژه‌ها و حساب‌های قبلی شما کاملاً محفوظ است!\n\n` +
             `👉 لطفاً با زدن دکمه زیر، <b>@MoshrefBashiBot</b> را به گروه خود اضافه کرده و از آن استفاده کنید:\n\n` +
             `────────────────────\n` +
